@@ -110,6 +110,8 @@ class ProgramParameter:
     def from_device(self, value):
         """Map a 0..1023 device value back to the native range."""
         span = self.maximum - self.minimum
+        if span <= 0:
+            return self.minimum
         return self.minimum + (min(max(value, PARAM_MIN), PARAM_MAX) / PARAM_MAX) * span
 
     def __repr__(self):

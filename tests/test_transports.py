@@ -696,7 +696,7 @@ def test_usb_cdc_skips_detach_when_disabled(monkeypatch):
     device, _, _ = _cdc_device()
     _install_usb(monkeypatch, device)
     transport = UsbCdcTransport(detach_kernel_driver=False)
-    assert device.detached == []
+    assert not device.detached
     transport.close()
 
 
@@ -720,4 +720,4 @@ def test_usb_cdc_skips_detach_when_no_driver_bound(monkeypatch):
     device.kernel_driver = False
     _install_usb(monkeypatch, device)
     UsbCdcTransport()
-    assert device.detached == []
+    assert not device.detached

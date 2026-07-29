@@ -11,6 +11,12 @@ from pyvmancer.discovery import DeviceInfo, find_device, find_devices
 from pyvmancer.errors import DeviceNotFoundError
 
 
+def _only(devices):
+    """Assert exactly one device was found and return it."""
+    assert len(devices) == 1
+    return devices[0]
+
+
 def _write(path, text):
     """Create a sysfs-style attribute file."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -62,7 +68,7 @@ def _add_sound_card(tmp_path, entry, card=0, interface="1-1:1.0", midi=True):
 def test_no_devices_found(sysfs):
     """An empty sysfs tree yields no devices."""
     assert not list(sysfs.iterdir())
-    assert find_devices() == []
+    assert not find_devices()
 
 
 def test_ignores_non_matching_and_incomplete_entries(sysfs):
@@ -71,13 +77,13 @@ def test_ignores_non_matching_and_incomplete_entries(sysfs):
     _make_device(sysfs, name="2-2", pid=0x9999)
     (sysfs / "usb1").mkdir()
     _write(sysfs / "3-1" / "idVendor", "16d0\n")
-    assert find_devices() == []
+    assert not find_devices()
 
 
 def test_find_devices_reads_identity(sysfs):
     """Serial, bus and address come straight from sysfs attributes."""
     _make_device(sysfs)
-    (device,) = find_devices()
+    device = _only(find_devices())
     assert device.serial_number == "VM0001"
     assert (device.bus, device.address) == (3, 42)
     assert device.usbfs_path == "/dev/bus/usb/003/042"
@@ -92,7 +98,7 @@ def test_find_devices_locates_child_nodes(tmp_path, sysfs):
     (entry / "1-1:1.2" / "tty" / "ttyACM0").mkdir(parents=True)
     (entry / "1-1:1.3" / "host0" / "target0:0:0" / "0:0:0:0" / "block" / "sda").mkdir(parents=True)
     _add_sound_card(tmp_path, entry)
-    (device,) = find_devices()
+    device = _only(find_devices())
     assert device.tty == "/dev/ttyACM0"
     assert device.block == "/dev/sda"
     assert device.rawmidi.endswith("/dev/snd/midiC0D0")
@@ -118,7 +124,7 @@ def test_invalid_numeric_attributes_become_none(sysfs):
     """Unreadable bus/address attributes leave the usbfs path undefined."""
     entry = _make_device(sysfs)
     _write(entry / "busnum", "not-a-number\n")
-    (device,) = find_devices()
+    device = _only(find_devices())
     assert device.bus is None
     assert device.usbfs_path is None
 

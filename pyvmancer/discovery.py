@@ -68,10 +68,16 @@ def _alsa_card_for(usb_path):
         if os.path.dirname(os.path.realpath(control)) != target:
             continue
         card = os.path.basename(os.path.dirname(control)).removeprefix("card")
-        nodes = sorted(glob.glob(f"/dev/snd/midiC{card}D*"))
+        nodes = glob.glob(f"/dev/snd/midiC{card}D*")
         if nodes:
-            return nodes[0]
+            return min(nodes, key=_device_ordinal)
     return None
+
+
+def _device_ordinal(path):
+    """Sort key ordering rawmidi nodes numerically, so D2 precedes D10."""
+    _, _, suffix = path.rpartition("D")
+    return (int(suffix), path) if suffix.isdigit() else (1 << 30, path)
 
 
 def _tty_for(usb_path):

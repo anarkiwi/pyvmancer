@@ -57,10 +57,10 @@ def test_program_parameter_from_device_clamps(value, expected):
 
 @pytest.mark.parametrize("minimum,maximum", [(5, 5), (10, 2)])
 def test_program_parameter_degenerate_range(minimum, maximum):
-    """A zero or inverted span has no usable scale."""
+    """A zero or inverted span has no usable scale, so both directions collapse."""
     param = ProgramParameter(0, "p", minimum, maximum)
     assert param.to_device(minimum) == PARAM_MIN
-    assert param.from_device(500) == pytest.approx(minimum + (500 / PARAM_MAX) * (maximum - minimum))
+    assert param.from_device(500) == pytest.approx(minimum)
 
 
 def test_program_parameter_repr():
