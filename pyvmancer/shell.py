@@ -9,6 +9,7 @@ import base64
 import json
 import time
 
+from . import scaling
 from .const import (
     BPM_MAX,
     BPM_MIN,
@@ -23,13 +24,47 @@ from .const import (
     resolve_operator,
 )
 from .errors import ShellError, ShellTimeoutError, VmancerError
+from .programs import MANIFEST_PATH, ProgramManifest
+from .video import VideoStatus, parse_timings
 
 OK = "ok"
 #: Firmware tags shell error codes with this bit pattern; the low half is the code.
 ERROR_TAG_MASK = 0x58000000
-#: ``fs caps`` reports ``read_max_bytes``; this is the conservative default.
+#: ``fs caps`` ``read_max_bytes`` default; it bounds the base64 payload, not the bytes.
 READ_CHUNK = 256
 WRITE_CHUNK = 256
+#: Combined ``Manual + Modulation + MIDI`` output keys, in order of preference.
+COMBINED_KEYS = ("o", "out", "output", "combined")
+#: Stored manual value keys.
+MANUAL_KEYS = ("m", "manual")
+#: Default seconds to wait after a timing change before re-reading the lock flags.
+RESYNC_SETTLE = 3.5
+
+
+def decoded_limit(payload_max):
+    """Decoded bytes that fit in a base64 payload of ``payload_max`` characters."""
+    return max(3, int(payload_max) // 4 * 3)
+
+
+def _pick(data, keys):
+    """First present key of ``keys`` in ``data``."""
+    return next((data[key] for key in keys if key in data), None)
+
+
+def _slot_vector(payload, keys):
+    """Extract a 12-slot value vector from parallel arrays or per-slot dicts."""
+    if not isinstance(payload, dict):
+        return None
+    for value in [payload.get(key) for key in keys] + list(payload.values()):
+        if not isinstance(value, (list, tuple)) or len(value) != PARAM_COUNT:
+            continue
+        if all(isinstance(slot, dict) for slot in value):
+            slots = [_pick(slot, keys) for slot in value]
+            if all(slot is not None for slot in slots):
+                return scaling.clamp(slots)
+        elif all(isinstance(slot, (int, float)) and not isinstance(slot, bool) for slot in value):
+            return scaling.clamp(value)
+    return None
 
 
 def decode_error_code(code):
@@ -322,6 +357,10 @@ class ShellClient:
         """Input/output video source, timing and lock state."""
         return self.command("video", "status").json()
 
+    def video_state(self):
+        """``video status`` parsed into a :class:`~pyvmancer.video.VideoStatus`."""
+        return VideoStatus.from_json(self.video_status())
+
     def set_video_input(self, source):
         """Select the video input source."""
         return self._ok("video", "input", source)
@@ -329,6 +368,50 @@ class ShellClient:
     def set_video_timing(self, timing):
         """Force a video timing standard, e.g. ``NTSC`` or ``1080p30``."""
         return self._ok("video", "timing", timing)
+
+    def video_timings(self):
+        """Timing standards this firmware accepts, read from its usage string."""
+        try:
+            return parse_timings(self.command("video", "timing").payload)
+        except ShellError as err:
+            return parse_timings(err.message)
+
+    def resync(self, alternate=None, settle=RESYNC_SETTLE, attempts=4, sleep=time.sleep):
+        """Re-initialise the output raster by bouncing the video timing.
+
+        Bounces through a standard the source cannot satisfy and back; ``alternate``
+        defaults to the first accepted standard that differs. The bounce drops the
+        input selection, so it is reasserted, and leaves ``overridden: true``.
+        """
+        status = self.video_state()
+        if not status.timing:
+            return False
+        alternate = alternate or next((t for t in self.video_timings() if t != status.timing), None)
+        if not alternate:
+            return False
+        self.set_video_timing(alternate)
+        sleep(settle)
+        self.set_video_timing(status.timing)
+        sleep(settle)
+        if status.input_source:
+            self.set_video_input(status.input_source)
+        for _ in range(max(1, attempts)):
+            sleep(settle)
+            if self.video_state().source_locked:
+                return True
+        return False
+
+    def combined_values(self):
+        """Combined ``Manual + Modulation + MIDI`` value of all 12 slots.
+
+        Read from ``modulation status``, falling back to the stored manual values
+        in ``program state`` on firmware that omits the combined output.
+        """
+        for read, keys in ((self.modulation_status, COMBINED_KEYS), (self.program_state, MANUAL_KEYS)):
+            values = _slot_vector(read(), keys)
+            if values is not None:
+                return values
+        raise VmancerError("device reported no 12-slot parameter state")
 
     def fpga_status(self):
         """FPGA configuration state and loaded program."""
@@ -440,25 +523,41 @@ class ShellClient:
         return self._ok("fs", "rename", _check_path(old), _check_path(new))
 
     def read_file(self, path, chunk=None):
-        """Read a whole file, following the paginated base64 chunk protocol."""
+        """Read a whole file, following the paginated base64 chunk protocol.
+
+        ``fs read`` answers ``{"data": "<base64>", "read": n}``; ``chunk`` counts
+        decoded bytes, which the firmware limit bounds only after encoding.
+        """
         target = _check_path(path)
         limit = chunk or self._read_limit()
         size = int(self.stat(target).get("size", 0))
         out = bytearray()
         while len(out) < size:
-            payload = self.command("fs", "read", target, len(out), min(limit, size - len(out))).payload
-            data = base64.b64decode(payload) if payload else b""
+            reply = self.command("fs", "read", target, len(out), min(limit, size - len(out)))
+            data = base64.b64decode(reply.json().get("data", "")) if reply.payload else b""
             if not data:
                 break
             out.extend(data)
         return bytes(out)
 
     def _read_limit(self):
-        """Largest ``fs read`` chunk this firmware accepts."""
+        """Decoded bytes per ``fs read`` that stay inside the firmware's payload cap."""
         try:
-            return int(self.fs_caps().get("read_max_bytes", READ_CHUNK))
-        except (VmancerError, ValueError):
-            return READ_CHUNK
+            return decoded_limit(self.fs_caps().get("read_max_bytes", READ_CHUNK))
+        except (VmancerError, ValueError, TypeError):
+            return decoded_limit(READ_CHUNK)
+
+    def hash_file(self, path):
+        """Device-computed ``{"hash": <sha256 hex>, "size": n}`` for a file.
+
+        Advertised as ``fs_hash`` in ``fs caps``; the digest is the natural cache
+        key for anything derived from a program binary.
+        """
+        return self.command("fs", "hash", _check_path(path)).json()
+
+    def program_manifest(self, path=MANIFEST_PATH):
+        """Parsed program library manifest, covering SD-installed programs only."""
+        return ProgramManifest.from_bytes(self.read_file(path))
 
     def write_file(self, path, data, chunk=WRITE_CHUNK):
         """Write bytes to a file in base64 chunks."""

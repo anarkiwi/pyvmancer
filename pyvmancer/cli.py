@@ -71,6 +71,12 @@ def build_parser():
     load = sub.add_parser("load", help="load an FPGA program by name over serial")
     load.add_argument("name")
 
+    sub.add_parser("manifest", help="show the SD program manifest over serial")
+    sub.add_parser("resync", help="bounce the video timing to recover the output")
+
+    hasher = sub.add_parser("hash", help="device-computed sha256 of a file on the SD card")
+    hasher.add_argument("path")
+
     shell_cmd = sub.add_parser("shell", help="run a raw serial shell command")
     shell_cmd.add_argument("words", nargs="+")
     return parser
@@ -102,6 +108,13 @@ def _run_shell(args):
             _print_json(shell.presets())
         elif args.command == "load":
             shell.load_program(args.name)
+        elif args.command == "manifest":
+            manifest = shell.program_manifest()
+            _print_json({"version": manifest.version, "programs": manifest.raw.get("programs", [])})
+        elif args.command == "resync":
+            _print_json({"locked": shell.resync()})
+        elif args.command == "hash":
+            _print_json(shell.hash_file(args.path))
         elif args.command == "shell":
             print(shell.command(*args.words).payload)
     return 0

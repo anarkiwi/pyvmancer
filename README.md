@@ -43,6 +43,17 @@ d.play()
 d.close()
 ```
 
+Device knowledge the library encodes, rather than leaving to each caller:
+
+```python
+d.park()                           # manual values to a reference, so a CC is absolute
+p = d.parameter("Posterize")       # p.role, p.steps, p.sample_values()
+d.program_manifest().get("combing").description
+d.file_hash("sd:/programs/lzx/combing.vmprog")
+d.video_state().source_locked      # per-input lock, not the genlock flag
+d.resync()                         # bounce the timing to re-init the output raster
+```
+
 MIDI only, no serial link needed:
 
 ```python
@@ -61,6 +72,9 @@ vmancer set 1=0.5 7=on          # set parameters over MIDI
 vmancer preset 3                # recall a preset
 vmancer programs                # list installed FPGA programs
 vmancer load Isotherm           # load a program
+vmancer manifest                # SD program library metadata
+vmancer hash sd:/programs/x.vmprog
+vmancer resync                  # recover an output that stopped passing frames
 vmancer shell modulation status # run any raw shell command
 ```
 
@@ -75,10 +89,12 @@ serial needs the `dialout` group or an ACL on `/dev/ttyACM*`. See
 - [docs/protocol.md](docs/protocol.md) — MIDI implementation and the serial command set
 - [docs/permissions.md](docs/permissions.md) — device node access, containers, udev
 - [docs/firmware-notes.md](docs/firmware-notes.md) — observed firmware behaviour and quirks
+- [CHANGELOG.md](CHANGELOG.md) — release history
 
 ## Status
 
-Verified against a Videomancer running firmware `1.0.0-rc.37`. Not affiliated with LZX Industries.
+Verified against a Videomancer running firmware `1.0.0-rc.37` and `1.0.0-rc.40`.
+Not affiliated with LZX Industries.
 
 ## License
 

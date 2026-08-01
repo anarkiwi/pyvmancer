@@ -5,19 +5,21 @@ import json
 
 import pytest
 
-from pyvmancer.const import PARAM_COUNT, PresetBank, TransportState
+from pyvmancer.const import PARAM_COUNT, PARAM_MAX, PresetBank, TransportState
 from pyvmancer.errors import ShellError, ShellTimeoutError, VmancerError
+from pyvmancer.programs import MANIFEST_PATH
 from pyvmancer.shell import (
     ERROR_TAG_MASK,
     READ_CHUNK,
     Reply,
     ShellClient,
     decode_error_code,
+    decoded_limit,
     encode_preset,
     parse_line,
 )
 
-from .conftest import FakeByteTransport
+from .conftest import FakeByteTransport, script_file
 
 # pylint: disable=protected-access
 
@@ -396,28 +398,34 @@ def test_midi_monitor_mode_validation(shell):
         shell.midi_monitor("loud")
 
 
-def _script_file(byte_transport, path, data, limit):
-    """Script stat/caps/read replies for a whole-file read."""
-    byte_transport.on("fs caps", json.dumps({"read_max_bytes": limit}))
-    byte_transport.on(f"fs stat {path}", json.dumps({"size": len(data)}))
-    for offset in range(0, len(data), limit):
-        count = min(limit, len(data) - offset)
-        chunk = base64.b64encode(data[offset : offset + count]).decode("ascii")
-        byte_transport.on(f"fs read {path} {offset} {count}", chunk)
+@pytest.mark.parametrize("payload_max,expected", [(256, 192), (16, 12), (4, 3), (3, 3), (0, 3)])
+def test_decoded_limit_never_overruns_the_payload_cap(payload_max, expected):
+    """The firmware caps the base64 payload, so 4 characters carry 3 bytes."""
+    assert decoded_limit(payload_max) == expected
+    assert len(base64.b64encode(b"x" * expected)) <= max(payload_max, 4)
 
 
-def test_read_file_chunks_with_base64(shell, byte_transport):
-    """A file larger than one chunk is fetched in offset/length pages."""
+def test_read_file_decodes_the_json_envelope(shell, byte_transport):
+    """``fs read`` answers ``{"data": ..., "read": n}``, not bare base64."""
     data = bytes(range(256)) + bytes(range(44))
-    _script_file(byte_transport, "sd:/a.bin", data, 256)
+    script_file(byte_transport, "sd:/a.bin", data, 256)
     assert shell.read_file("sd:/a.bin") == data
-    assert byte_transport.written[-2:] == ["fs read sd:/a.bin 0 256", "fs read sd:/a.bin 256 44"]
+
+
+def test_read_file_chunks_below_the_payload_cap(shell, byte_transport):
+    """Requests are sized so their base64 encoding fits the reported limit."""
+    data = bytes(range(256)) + bytes(range(44))
+    script_file(byte_transport, "sd:/a.bin", data, 256)
+    shell.read_file("sd:/a.bin")
+    requested = [int(line.split(" ")[-1]) for line in byte_transport.written if "fs read" in line]
+    assert requested == [192, 108]
+    assert max(len(base64.b64encode(b"x" * count)) for count in requested) <= 256
 
 
 def test_read_file_honours_explicit_chunk(shell, byte_transport):
     """An explicit chunk size skips the capability query."""
     data = bytes(range(32))
-    _script_file(byte_transport, "sd:/b.bin", data, 16)
+    script_file(byte_transport, "sd:/b.bin", data, 64, chunk=16)
     assert shell.read_file("sd:/b.bin", chunk=16) == data
     assert "fs caps" not in byte_transport.written
 
@@ -426,7 +434,15 @@ def test_read_file_stops_on_empty_payload(shell, byte_transport):
     """A short device reply ends the transfer rather than spinning."""
     byte_transport.on("fs caps", '{"read_max_bytes":16}')
     byte_transport.on("fs stat sd:/c.bin", '{"size":64}')
-    byte_transport.on("fs read sd:/c.bin 0 16", "")
+    byte_transport.on("fs read sd:/c.bin 0 12", "")
+    assert shell.read_file("sd:/c.bin") == b""
+
+
+def test_read_file_stops_on_empty_data_field(shell, byte_transport):
+    """An envelope carrying no data ends the transfer too."""
+    byte_transport.on("fs caps", '{"read_max_bytes":16}')
+    byte_transport.on("fs stat sd:/c.bin", '{"size":64}')
+    byte_transport.on("fs read sd:/c.bin 0 12", '{"data":"","read":0}')
     assert shell.read_file("sd:/c.bin") == b""
 
 
@@ -440,13 +456,53 @@ def test_read_file_empty_file(shell, byte_transport):
 def test_read_limit_falls_back_when_caps_fail(shell, byte_transport):
     """An unsupported ``fs caps`` falls back to the conservative default."""
     byte_transport.on_error("fs caps", 1, "unknown command")
-    assert shell._read_limit() == READ_CHUNK
+    assert shell._read_limit() == decoded_limit(READ_CHUNK)
 
 
 def test_read_limit_falls_back_on_bad_value(shell, byte_transport):
     """A non-numeric limit falls back too."""
     byte_transport.on("fs caps", '{"read_max_bytes":"lots"}')
-    assert shell._read_limit() == READ_CHUNK
+    assert shell._read_limit() == decoded_limit(READ_CHUNK)
+
+
+def test_hash_file(shell, byte_transport):
+    """``fs hash`` returns the device-computed digest and size."""
+    byte_transport.on("fs hash sd:/programs/x.vmprog", '{"hash":"abc123","size":4096}')
+    assert shell.hash_file("sd:/programs/x.vmprog") == {"hash": "abc123", "size": 4096}
+
+
+def test_hash_file_validates_path(shell):
+    """The digest verb takes the same path checks as every other fs verb."""
+    with pytest.raises(ValueError, match="must start with"):
+        shell.hash_file("/etc/passwd")
+
+
+MANIFEST = {
+    "format_version": "1.0",
+    "version": "1.0.2",
+    "product": "Videomancer",
+    "programs": [
+        {
+            "name": "combing",
+            "file": "lzx/combing.vmprog",
+            "program_id": "com.lzxindustries.combing",
+            "program_name": "Combing",
+            "program_version": "1.0.0",
+            "categories": ["Signal"],
+            "program_type": "processing",
+            "description": "Interlace comb artifact simulation",
+            "author": "Lars Larsen",
+        }
+    ],
+}
+
+
+def test_program_manifest_reads_and_parses(shell, byte_transport):
+    """The manifest is read off the SD card and parsed into entries."""
+    script_file(byte_transport, MANIFEST_PATH, json.dumps(MANIFEST).encode(), 256)
+    manifest = shell.program_manifest()
+    assert manifest.version == "1.0.2"
+    assert manifest.get("Combing").author == "Lars Larsen"
 
 
 def test_write_file_chunks_with_base64(shell, byte_transport):
@@ -473,6 +529,121 @@ def test_close_and_context_manager():
         assert client.transport is transport
     assert transport.closed
     assert transport.name == "FakeByteTransport"
+
+
+def test_combined_values_prefers_modulation_status(shell, byte_transport):
+    """The combined output is read from ``modulation status`` when present."""
+    byte_transport.on("modulation status", json.dumps({"o": list(range(PARAM_COUNT))}))
+    assert shell.combined_values().tolist() == list(range(PARAM_COUNT))
+    assert "program state" not in byte_transport.written
+
+
+def test_combined_values_accepts_per_slot_dicts(shell, byte_transport):
+    """``modulation status`` may report one dict per slot instead of arrays."""
+    slots = [{"src": "Disabled", "out": index * 10} for index in range(PARAM_COUNT)]
+    byte_transport.on("modulation status", json.dumps({"slots": slots}))
+    assert shell.combined_values().tolist() == [index * 10 for index in range(PARAM_COUNT)]
+
+
+def test_combined_values_clamps_to_the_device_range(shell, byte_transport):
+    """Out-of-range values clamp rather than propagating."""
+    byte_transport.on("modulation status", json.dumps({"o": [-5] + [2000] * (PARAM_COUNT - 1)}))
+    assert shell.combined_values().tolist() == [0] + [PARAM_MAX] * (PARAM_COUNT - 1)
+
+
+def test_combined_values_falls_back_to_program_state(shell, byte_transport):
+    """Firmware without a combined output yields the stored manual values."""
+    byte_transport.on("modulation status", "{}")
+    byte_transport.on("program state", json.dumps({"m": [7] * PARAM_COUNT}))
+    assert shell.combined_values().tolist() == [7] * PARAM_COUNT
+
+
+def test_combined_values_raises_when_no_vector_is_reported(shell, byte_transport):
+    """Neither command carrying 12 slots is an error, not a silent empty."""
+    byte_transport.on("modulation status", '{"o":[1,2]}')
+    byte_transport.on("program state", "[]")
+    with pytest.raises(VmancerError, match="no 12-slot parameter state"):
+        shell.combined_values()
+
+
+VIDEO_STATUS = {
+    "input": "hdmi",
+    "timing": "1080p30",
+    "locked": False,
+    "overridden": True,
+    "hdmi": {"locked": True, "connected": False},
+    "analog": {"locked": False},
+}
+
+
+def test_video_state_parses_lock_semantics(shell, byte_transport):
+    """The top-level flag tracks genlock; the selected input's sub-status wins."""
+    byte_transport.on("video status", json.dumps(VIDEO_STATUS))
+    status = shell.video_state()
+    assert (status.timing, status.input_source) == ("1080p30", "hdmi")
+    assert not status.locked
+    assert status.overridden
+    assert status.source_locked
+
+
+def _script_video(byte_transport, locked, timing="1080p30", usage="NTSC|PAL|1080p30"):
+    """Script ``video status`` and the ``video timing`` usage string."""
+    byte_transport.on(
+        "video status", json.dumps({"input": "hdmi", "timing": timing, "hdmi": {"locked": locked}})
+    )
+    byte_transport.on_error("video timing", 2, f"usage: video timing <{usage}>")
+
+
+def test_video_timings_read_from_the_usage_string(shell, byte_transport):
+    """The accepted standards are discovered, never assumed."""
+    _script_video(byte_transport, True, usage="NTSC|PAL|720p60|...")
+    assert shell.video_timings() == ["NTSC", "PAL", "720p60"]
+
+
+def test_video_timings_from_a_successful_reply(shell, byte_transport):
+    """Firmware answering rather than erroring is parsed the same way."""
+    byte_transport.on("video timing", "usage: video timing <NTSC|PAL>")
+    assert shell.video_timings() == ["NTSC", "PAL"]
+
+
+def test_resync_bounces_the_timing_and_reasserts_the_input(shell, byte_transport):
+    """The bounce leaves the native timing and input selection restored."""
+    _script_video(byte_transport, True)
+    assert shell.resync(settle=0, attempts=1, sleep=lambda _: None)
+    assert byte_transport.written[-4:-1] == [
+        "video timing NTSC",
+        "video timing 1080p30",
+        "video input hdmi",
+    ]
+
+
+def test_resync_accepts_a_caller_supplied_alternate(shell, byte_transport):
+    """The alternate standard is a rig property, so callers may name it."""
+    _script_video(byte_transport, True)
+    shell.resync(alternate="PAL", settle=0, attempts=1, sleep=lambda _: None)
+    assert "video timing PAL" in byte_transport.written
+    assert "video timing" not in byte_transport.written
+
+
+def test_resync_polls_until_the_input_reports_lock(shell, byte_transport):
+    """Lock flags lag the signal, so the status is polled rather than sampled once."""
+    _script_video(byte_transport, False)
+    sleeps = []
+    assert not shell.resync(settle=0.1, attempts=3, sleep=sleeps.append)
+    assert byte_transport.written.count("video status") == 4
+    assert len(sleeps) == 5
+
+
+def test_resync_without_a_reported_timing(shell, byte_transport):
+    """Nothing to restore means nothing to bounce."""
+    byte_transport.on("video status", "{}")
+    assert not shell.resync(sleep=lambda _: None)
+
+
+def test_resync_without_a_usable_alternate(shell, byte_transport):
+    """A firmware naming only the current standard cannot be bounced."""
+    _script_video(byte_transport, True, usage="1080p30")
+    assert not shell.resync(settle=0, sleep=lambda _: None)
 
 
 def test_byte_transport_is_its_own_context_manager():

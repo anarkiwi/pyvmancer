@@ -23,11 +23,31 @@ API.
 Values are 10-bit, `0..1023`, midpoint `512`. A toggle reads as on at `>= 512`.
 The device combines sources as `Parameter = Manual + Modulation + MIDI`, so a
 MIDI CC is an offset on top of the panel position rather than a replacement for
-it.
+it. `modulation set <slot 0-11> <manual> [time] [space] [slope]` over serial is
+absolute; a CC never is. See [firmware-notes.md](firmware-notes.md) for what
+that means for repeatable automation, and `Videomancer.park`.
+
+P12 is the crossfader and gates the output even in programs whose `program info`
+names it `Null 12`, so parking it at zero blacks the device out. The default
+`pyvmancer.const.PARK_REFERENCE` therefore zeroes P1-P11 and leaves P12 open.
+
+### Program parameters
 
 Each loaded program names its own twelve parameters and declares a native range
-for each; `program info` reports them. `pyvmancer.device.ProgramParameter` maps
-those native units linearly onto `0..1023`.
+for each; `program info` reports `{"name","id","parameters":[{"name","min","max"}]}`.
+`pyvmancer.device.ProgramParameter` maps those native units linearly onto
+`0..1023` and classifies the range into a `pyvmancer.const.ParamRole`:
+
+| Declared range | Role | Sampling |
+| --- | --- | --- |
+| `0..1` | boolean | two states, on at combined `>= 512` |
+| integer, no wider than the sweep resolution | quantised | one point per native position, `max-min+1` of them |
+| anything else | continuous | the caller's sweep resolution |
+| named `-` or `Null <n>` | unassigned | not sampled |
+
+`Posterize 0..7` has 8 positions; sampling it at 32 steps wastes device time.
+The enumerable/sweepable boundary is the caller's own resolution, so it is the
+`sweep_steps` argument to `classify_param` and `Videomancer.parameters`.
 
 ## MIDI
 
@@ -150,9 +170,51 @@ remote <enable|disable|status|write>
 language [en_US|de_DE|fr_FR|es_ES|...]
 ```
 
+### Video
+
+`video status` reports the output timing, the selected input and a set of lock
+flags; `pyvmancer.video.VideoStatus` parses it. The top-level `locked` flag
+tracks genlock, so it reads false whenever timing is overridden even though the
+input is fine, and the selected input's own sub-status (`hdmi`/`analog`) is the
+authoritative field in both directions. Every one of these flags is advisory —
+see [firmware-notes.md](firmware-notes.md).
+
+`video timing <standard>` forces an output standard and its usage string
+enumerates what the firmware accepts, which is how `ShellClient.video_timings`
+discovers the set rather than assuming one. Bouncing the timing away and back is
+the strongest output reset the shell offers (`ShellClient.resync`); it drops the
+input selection and leaves `overridden: true`.
+
 ### Filesystem
 
-All paths start with `sd:/` and may not contain `..`. `fs caps` reports transfer
-limits; on `1.0.0-rc.37` `read_max_bytes` is 256, so `fs read` must be chunked at
-or below that. `fs read`/`fs write` carry base64 payloads. `fs put` exists for
-bulk upload with an 8 MiB cap.
+All paths start with `sd:/` and may not contain `..`. `fs read`/`fs write` carry
+base64 payloads and `fs put` exists for bulk upload with an 8 MiB cap.
+
+`fs read <path> <offset> <count>` answers with a JSON envelope:
+
+```json
+{"data":"ewogICJmb3JtYXRfdmVyc2lvbiI6ICIxLjAiLAog...","read":96}
+```
+
+`fs caps` reports the transfer limits, and `read_max_bytes` (256 on
+`1.0.0-rc.37`/`rc.40`) bounds that **base64 payload**, not the decoded bytes: a
+request for 256 decoded bytes encodes to 344 characters and is truncated. A
+request must therefore ask for at most `read_max_bytes // 4 * 3` bytes, which is
+what `pyvmancer.shell.decoded_limit` computes.
+
+`fs caps` also advertises `fs_hash: 1`, for `fs hash <path>` →
+`{"hash": "<sha256 hex>", "size": n}`, computed on the device.
+
+`sd:/programs/manifest.json` lists the SD-installed program library:
+
+```json
+{"format_version":"1.0","version":"1.0.2","created":"...","product":"...",
+ "programs":[{"name":"combing","file":"lzx/combing.vmprog",
+   "program_id":"com.lzxindustries.combing","program_name":"Combing",
+   "program_version":"1.0.0","categories":["Signal"],"program_type":"processing",
+   "description":"Interlace comb artifact simulation ...","author":"Lars Larsen"}]}
+```
+
+`pyvmancer.programs.ProgramManifest` parses it. Coverage is partial: firmware
+built-in programs are not listed, so `programs list` is normally longer and
+those entries have no description available from any source.

@@ -1,15 +1,30 @@
 """In-memory fakes and fixtures. No test in this suite touches real hardware."""
 
+import base64
+import json
+
 import pytest
 
 from pyvmancer.midi import MidiController
-from pyvmancer.shell import ShellClient
+from pyvmancer.shell import ShellClient, decoded_limit
 from pyvmancer.transports.base import ByteTransport, MidiTransport
 
 
 def reply_line(tag, payload):
     """Render an ``@tag:payload`` success line."""
     return f"@{tag}:{payload}"
+
+
+def script_file(byte_transport, path, data, payload_max=256, chunk=None):
+    """Script the caps/stat/read replies that satisfy one whole-file read."""
+    byte_transport.on("fs caps", json.dumps({"read_max_bytes": payload_max}))
+    byte_transport.on(f"fs stat {path}", json.dumps({"size": len(data)}))
+    limit = chunk or decoded_limit(payload_max)
+    for offset in range(0, len(data), limit):
+        count = min(limit, len(data) - offset)
+        encoded = base64.b64encode(data[offset : offset + count]).decode("ascii")
+        byte_transport.on(f"fs read {path} {offset} {count}", json.dumps({"data": encoded, "read": count}))
+    return byte_transport
 
 
 def error_line(code, message):
