@@ -1,11 +1,33 @@
 """High-level Videomancer facade combining the MIDI and serial control paths."""
 
-from .const import PARAM_MAX, PARAM_MIN, USB_PID, USB_VID
+import time
+
+import numpy as np
+
+from . import scaling
+from .const import (
+    CROSSFADER_PARAM,
+    PARAM_COUNT,
+    PARAM_MAX,
+    PARAM_MIN,
+    PARK_REFERENCE,
+    SWEEP_STEPS,
+    USB_PID,
+    USB_VID,
+    ParamRole,
+    classify_param,
+)
 from .discovery import find_device
 from .errors import DeviceNotFoundError, TransportUnavailableError, VmancerError
 from .midi import MidiController
+from .scaling import MIDI_7BIT_MAX
 from .shell import ShellClient
 from .transports.rawmidi import RawMidiTransport
+
+#: Readback slack for :meth:`Videomancer.park`: one 7-bit CC step in device units.
+PARK_TOLERANCE = PARAM_MAX // MIDI_7BIT_MAX
+#: Default paced write rate, in MIDI messages per second.
+WRITE_RATE_HZ = 200.0
 
 
 def open_midi(serial_number=None, port=None, channel=None, high_resolution=True, prefer="auto"):
@@ -89,15 +111,46 @@ def open_shell(serial_number=None, port=None, timeout=5.0, prefer="auto"):
 
 
 class ProgramParameter:
-    """One named parameter of the loaded program, with its native range."""
+    """One named parameter of the loaded program, with its native range and role."""
 
-    __slots__ = ("index", "name", "minimum", "maximum")
+    __slots__ = ("index", "name", "minimum", "maximum", "role", "steps")
 
-    def __init__(self, index, name, minimum, maximum):
+    def __init__(self, index, name, minimum, maximum, sweep_steps=SWEEP_STEPS):
         self.index = index
         self.name = name
         self.minimum = minimum
         self.maximum = maximum
+        self.role, self.steps = classify_param(name, minimum, maximum, sweep_steps)
+
+    @property
+    def param(self):
+        """1-based slot number, as the MIDI API addresses it."""
+        return self.index + 1
+
+    @property
+    def assigned(self):
+        """False when the program leaves this slot unassigned."""
+        return self.role is not ParamRole.UNASSIGNED
+
+    @property
+    def crossfader(self):
+        """True for P12, which gates the output whatever the program names it."""
+        return self.param == CROSSFADER_PARAM
+
+    def as_bool(self, value):
+        """Resolve a combined device value as this parameter's on/off state."""
+        return bool(scaling.as_bool(value))
+
+    def sample_values(self, steps=SWEEP_STEPS):
+        """Device values worth visiting, honouring the role.
+
+        A boolean yields its two states and a quantised range one value per
+        native position; sampling either at ``steps`` points wastes device time.
+        """
+        if self.role is ParamRole.UNASSIGNED:
+            return np.empty(0, dtype=np.int64)
+        count = self.steps or steps
+        return np.rint(np.linspace(PARAM_MIN, PARAM_MAX, count)).astype(np.int64)
 
     def to_device(self, value):
         """Map a native value onto the 0..1023 device range."""
@@ -204,16 +257,17 @@ class Videomancer:
         self._parameters = None
         return result
 
-    def parameters(self, refresh=False):
+    def parameters(self, refresh=False, sweep_steps=SWEEP_STEPS):
         """Named parameters of the loaded program, indexed by name (serial only).
 
         The device reports each parameter's native range, e.g. ``Posterize``
-        ``0..7``; values are assumed to map linearly onto ``0..1023``.
+        ``0..7``; values map linearly onto ``0..1023`` and each range is
+        classified into a :class:`~pyvmancer.const.ParamRole`.
         """
         if self._parameters is None or refresh:
             info = self.shell.program_info()
             self._parameters = {
-                entry["name"]: ProgramParameter(index, entry["name"], entry["min"], entry["max"])
+                entry["name"]: ProgramParameter(index, entry["name"], entry["min"], entry["max"], sweep_steps)
                 for index, entry in enumerate(info.get("parameters", []))
             }
         return self._parameters
@@ -245,9 +299,58 @@ class Videomancer:
         """Assign a modulation operator to a named parameter (serial only)."""
         return self.shell.set_source(self.parameter(name).index, source)
 
+    def park(
+        self,
+        values=PARK_REFERENCE,
+        tolerance=PARK_TOLERANCE,
+        settle=0.25,
+        attempts=3,
+        rate_hz=WRITE_RATE_HZ,
+        sleep=time.sleep,
+    ):
+        """Drive every manual value to a reference, making MIDI CCs absolute.
+
+        Writes are paced at ``rate_hz`` because an unpaced burst drops the LSB of
+        14-bit CC pairs, and the readback settles first because serial and MIDI
+        are asynchronous. Returns the verified combined values.
+        """
+        reference = scaling.clamp(values)
+        if reference.shape != (PARAM_COUNT,):
+            raise ValueError(f"values must have {PARAM_COUNT} entries, got {reference.shape}")
+        if rate_hz <= 0:
+            raise ValueError(f"rate_hz must be positive, got {rate_hz}")
+        pace = (2 if self.midi.high_resolution else 1) / rate_hz
+        for index, value in enumerate(reference):
+            self.midi.set_param(index + 1, 0)
+            self.shell.set_modulation(index, int(value))
+            sleep(pace)
+        state = None
+        for _ in range(max(1, attempts)):
+            sleep(settle)
+            state = self.shell.combined_values()
+            if np.all(np.abs(state - reference) <= tolerance):
+                return state
+        raise VmancerError(f"parked values settled at {state.tolist()}, want {reference.tolist()}")
+
+    def resync(self, **kwargs):
+        """Recover the video output by bouncing the timing (serial only)."""
+        return self.shell.resync(**kwargs)
+
+    def video_state(self):
+        """Parsed video input, timing and lock state (serial only)."""
+        return self.shell.video_state()
+
     def programs(self):
         """List installed FPGA programs (serial only)."""
         return self.shell.programs()
+
+    def program_manifest(self):
+        """Metadata for SD-installed programs; built-ins are absent (serial only)."""
+        return self.shell.program_manifest()
+
+    def file_hash(self, path):
+        """Device-computed sha256 of a file, as hex (serial only)."""
+        return self.shell.hash_file(path)["hash"]
 
     def presets(self):
         """List factory and user presets (serial only)."""

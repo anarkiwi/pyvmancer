@@ -4,16 +4,68 @@ import pytest
 
 from pyvmancer import const
 from pyvmancer.const import (
+    CROSSFADER_PARAM,
     OPERATORS,
     PARAM_COUNT,
+    PARAM_MAX,
+    PARAM_MIN,
+    PARK_REFERENCE,
     PER_LINE_PARAMS,
+    SWEEP_STEPS,
     Operator,
     OperatorCategory,
     ParamKind,
+    ParamRole,
     Transport,
+    classify_param,
+    is_unassigned,
     param_kind,
     resolve_operator,
 )
+
+
+@pytest.mark.parametrize("name", ["-", "", " ", "Null", "Null 12", "null 3", "NONE", "none"])
+def test_unassigned_slot_names(name):
+    """``program info`` marks an unassigned slot ``-`` or ``Null <n>``."""
+    assert is_unassigned(name)
+
+
+@pytest.mark.parametrize("name", ["Mix", "Nullify", "Null x", "0"])
+def test_assigned_slot_names(name):
+    """A real parameter name is never mistaken for an empty slot."""
+    assert not is_unassigned(name)
+
+
+@pytest.mark.parametrize(
+    "minimum,maximum,role,steps",
+    [
+        (0, 1, ParamRole.BOOLEAN, 2),
+        (0, 7, ParamRole.QUANTIZED, 8),
+        (1, 4, ParamRole.QUANTIZED, 4),
+        (0, SWEEP_STEPS - 1, ParamRole.QUANTIZED, SWEEP_STEPS),
+        (0, SWEEP_STEPS, ParamRole.CONTINUOUS, None),
+        (0, 100, ParamRole.CONTINUOUS, None),
+        (0.0, 2.5, ParamRole.CONTINUOUS, None),
+        (5, 5, ParamRole.UNASSIGNED, None),
+        (10, 2, ParamRole.UNASSIGNED, None),
+    ],
+)
+def test_classify_param(minimum, maximum, role, steps):
+    """Range width and integrality decide how a parameter is sampled."""
+    assert classify_param("Levels", minimum, maximum) == (role, steps)
+
+
+def test_classify_param_sweep_steps_is_a_documented_argument():
+    """The enumerable/sweepable boundary is the caller's sweep resolution."""
+    assert classify_param("Levels", 0, 40, sweep_steps=64) == (ParamRole.QUANTIZED, 41)
+    assert classify_param("Levels", 0, 40, sweep_steps=8) == (ParamRole.CONTINUOUS, None)
+
+
+def test_park_reference_opens_the_crossfader():
+    """Parking P12 at zero blacks out the device, so the reference leaves it open."""
+    assert len(PARK_REFERENCE) == PARAM_COUNT
+    assert PARK_REFERENCE[CROSSFADER_PARAM - 1] == PARAM_MAX
+    assert set(PARK_REFERENCE[: CROSSFADER_PARAM - 1]) == {PARAM_MIN}
 
 
 @pytest.mark.parametrize(

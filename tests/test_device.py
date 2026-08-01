@@ -2,16 +2,26 @@
 
 import json
 
+import numpy as np
 import pytest
 
 from pyvmancer import device as device_module
-from pyvmancer.const import PARAM_MAX, PARAM_MIN
-from pyvmancer.device import ProgramParameter, Videomancer, open_midi, open_shell
+from pyvmancer.const import (
+    BOOL_THRESHOLD,
+    CROSSFADER_PARAM,
+    PARAM_COUNT,
+    PARAM_MAX,
+    PARAM_MIN,
+    PARK_REFERENCE,
+    ParamRole,
+)
+from pyvmancer.device import PARK_TOLERANCE, ProgramParameter, Videomancer, open_midi, open_shell
 from pyvmancer.errors import DeviceNotFoundError, TransportUnavailableError, VmancerError
 from pyvmancer.midi import MidiController
+from pyvmancer.programs import MANIFEST_PATH
 from pyvmancer.shell import ShellClient
 
-from .conftest import FakeByteTransport, FakeMidiTransport
+from .conftest import FakeByteTransport, FakeMidiTransport, script_file
 
 PROGRAM_INFO = {
     "name": "posterize",
@@ -66,6 +76,53 @@ def test_program_parameter_degenerate_range(minimum, maximum):
 def test_program_parameter_repr():
     """The repr shows the 1-based slot and the native range."""
     assert repr(ProgramParameter(2, "Mix", 0, 100)) == "ProgramParameter(P3, 'Mix', 0..100)"
+
+
+@pytest.mark.parametrize(
+    "name,minimum,maximum,role,steps",
+    [
+        ("Invert", 0, 1, ParamRole.BOOLEAN, 2),
+        ("Posterize", 0, 7, ParamRole.QUANTIZED, 8),
+        ("Mix", 0, 100, ParamRole.CONTINUOUS, None),
+        ("Gain", 0.0, 1.5, ParamRole.CONTINUOUS, None),
+        ("-", 0, 100, ParamRole.UNASSIGNED, None),
+        ("Null 12", 0, 1023, ParamRole.UNASSIGNED, None),
+        ("Levels", 5, 5, ParamRole.UNASSIGNED, None),
+    ],
+)
+def test_program_parameter_roles(name, minimum, maximum, role, steps):
+    """Each declared range classifies by the device's own semantics."""
+    param = ProgramParameter(0, name, minimum, maximum)
+    assert (param.role, param.steps) == (role, steps)
+    assert param.assigned == (role is not ParamRole.UNASSIGNED)
+
+
+def test_program_parameter_sample_values_honour_the_role():
+    """Booleans yield two points and quantised ranges one point per position."""
+    assert ProgramParameter(0, "Invert", 0, 1).sample_values().tolist() == [PARAM_MIN, PARAM_MAX]
+    assert len(ProgramParameter(0, "Posterize", 0, 7).sample_values()) == 8
+    assert len(ProgramParameter(0, "Mix", 0, 100).sample_values(steps=9)) == 9
+    assert ProgramParameter(0, "-", 0, 1).sample_values().size == 0
+
+
+def test_program_parameter_quantised_steps_land_on_distinct_native_values():
+    """Sampling a quantised range visits every native position exactly once."""
+    param = ProgramParameter(0, "Posterize", 0, 7)
+    assert [round(param.from_device(value)) for value in param.sample_values()] == list(range(8))
+
+
+def test_program_parameter_boolean_threshold():
+    """A boolean resolves on at the documented combined midpoint."""
+    param = ProgramParameter(6, "Invert", 0, 1)
+    assert param.as_bool(BOOL_THRESHOLD)
+    assert not param.as_bool(BOOL_THRESHOLD - 1)
+
+
+def test_program_parameter_crossfader_slot():
+    """P12 is the crossfader whatever the loaded program calls it."""
+    assert ProgramParameter(11, "Null 12", 0, 1023).crossfader
+    assert not ProgramParameter(0, "Levels", 0, 7).crossfader
+    assert ProgramParameter(11, "Null 12", 0, 1023).param == CROSSFADER_PARAM
 
 
 @pytest.fixture(name="fakes")
@@ -196,6 +253,81 @@ def test_shell_delegation(vm, fakes):
     assert vm.status() == {"product": "Videomancer"}
     vm.set_bpm(120)
     assert fakes[1].last == "transport bpm 12000"
+
+
+def _park_status(values=PARK_REFERENCE):
+    """A ``modulation status`` reply reporting ``values`` as the combined output."""
+    return json.dumps({"o": list(values)})
+
+
+def test_park_writes_absolute_manual_values_and_zero_ccs(vm, fakes):
+    """Parking zeroes the MIDI contribution and sets the manual values over serial."""
+    fakes[1].on("modulation status", _park_status())
+    assert vm.park(sleep=lambda _: None).tolist() == list(PARK_REFERENCE)
+    manual = [line for line in fakes[1].written if line.startswith("modulation set")]
+    assert manual[0] == "modulation set 0 0"
+    assert manual[-1] == f"modulation set 11 {PARAM_MAX}"
+    assert set(fakes[0].data[2::3]) == {0}
+
+
+def test_park_leaves_the_crossfader_open(vm, fakes):
+    """Parking P12 at zero would black out the device, so the reference opens it."""
+    fakes[1].on("modulation status", _park_status())
+    assert vm.park(sleep=lambda _: None)[CROSSFADER_PARAM - 1] == PARAM_MAX
+    assert f"modulation set 11 {PARAM_MAX}" in fakes[1].written
+
+
+def test_park_paces_writes_and_settles_before_verifying(vm, fakes):
+    """Unpaced bursts drop 14-bit LSBs, and the readback lags the last write."""
+    fakes[1].on("modulation status", _park_status())
+    sleeps = []
+    vm.park(rate_hz=100.0, settle=0.5, sleep=sleeps.append)
+    assert sleeps == [2 / 100.0] * PARAM_COUNT + [0.5]
+    assert fakes[1].written.index("modulation status") > fakes[1].written.index("modulation set 11 1023")
+
+
+def test_park_retries_until_the_readback_settles(vm, monkeypatch):
+    """A slot sampled before the device applied it is polled again, not failed."""
+    drifted = np.array(list(PARK_REFERENCE[:-1]) + [0])
+    replies = iter([drifted, np.array(PARK_REFERENCE)])
+    monkeypatch.setattr(vm.shell, "combined_values", lambda: next(replies))
+    assert vm.park(attempts=2, sleep=lambda _: None).tolist() == list(PARK_REFERENCE)
+
+
+def test_park_raises_when_values_never_settle(vm, fakes):
+    """A reference the device does not reach is an error, not a silent pass."""
+    fakes[1].on("modulation status", _park_status([0] * PARAM_COUNT))
+    with pytest.raises(VmancerError, match="parked values settled at"):
+        vm.park(attempts=2, sleep=lambda _: None)
+
+
+def test_park_tolerance_is_one_cc_step(vm, fakes):
+    """Readback slack is one 7-bit CC step, the coarsest a write can quantise to."""
+    near = [PARK_TOLERANCE] * (PARAM_COUNT - 1) + [PARAM_MAX - PARK_TOLERANCE]
+    fakes[1].on("modulation status", _park_status(near))
+    assert vm.park(attempts=1, sleep=lambda _: None).tolist() == near
+
+
+@pytest.mark.parametrize(
+    "kwargs,match",
+    [({"values": [0, 1]}, "must have 12 entries"), ({"rate_hz": 0}, "rate_hz must be positive")],
+)
+def test_park_argument_validation(vm, kwargs, match):
+    """A malformed reference or write rate is refused before anything is sent."""
+    with pytest.raises(ValueError, match=match):
+        vm.park(sleep=lambda _: None, **kwargs)
+
+
+def test_device_knowledge_delegation(vm, fakes):
+    """Manifest, digest, video state and resync all reach the shell client."""
+    script_file(fakes[1], MANIFEST_PATH, json.dumps({"version": "1.0.2", "programs": []}).encode())
+    fakes[1].on("fs hash sd:/programs/x.vmprog", '{"hash":"deadbeef","size":32}')
+    fakes[1].on("video status", '{"input":"analog","timing":"PAL","analog":{"locked":true}}')
+    fakes[1].on_error("video timing", 2, "usage: video timing <NTSC|PAL>")
+    assert vm.program_manifest().version == "1.0.2"
+    assert vm.file_hash("sd:/programs/x.vmprog") == "deadbeef"
+    assert vm.video_state().source_locked
+    assert vm.resync(settle=0, attempts=1, sleep=lambda _: None)
 
 
 def test_close_closes_every_link(vm, fakes):

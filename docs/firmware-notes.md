@@ -1,6 +1,6 @@
 # Firmware notes
 
-Observations from a Videomancer running `1.0.0-rc.37`, serial `E464B0605F113625`.
+Observations from a Videomancer running `1.0.0-rc.37` and `1.0.0-rc.40`.
 The published LZX documentation describes a `2.1.0` firmware, and the two differ
 in several places. Always treat `help` and `fs caps` as authoritative.
 
@@ -50,11 +50,31 @@ Most commands reply `@<tag>:ok`, but several use a verb of their own. Observed o
 `transport play/stop/bpm`, `modulation set/source/reset/latch`, `remote write` and
 the preset and filesystem mutations all do reply `ok`.
 
-## `fs read` is capped at 256 bytes
+## `fs read` caps the base64 payload, not the decoded bytes
 
-`fs caps` reports `read_max_bytes: 256`. Larger requests fail, so reads must be
-chunked at or below that. `pyvmancer` queries `fs caps` and uses the reported
-limit.
+`fs caps` reports `read_max_bytes: 256` on `1.0.0-rc.37` and `rc.40`, and the
+reply is a JSON envelope, `{"data":"<base64>","read":n}`. The limit applies to
+the encoded payload: asking for 256 decoded bytes produces 344 characters of
+base64, overruns the buffer and truncates the reply. Requests must ask for at
+most `read_max_bytes // 4 * 3` decoded bytes; 96 bytes per request was verified
+working on hardware, and `pyvmancer.shell.decoded_limit` derives the maximum.
+
+Both halves of this were wrong in 0.1.0: the whole envelope was base64-decoded,
+and the chunk size was in the wrong units, so no file read back correctly.
+
+## `fs hash` is the cheap way to key a cache
+
+`fs caps` advertises `fs_hash: 1`, and `fs hash <path>` returns
+`{"hash": "<sha256 hex>", "size": n}` computed on the device, without moving the
+file over the 256-byte-per-chunk read path.
+
+## The program manifest covers only SD-installed programs
+
+`sd:/programs/manifest.json` carries the name, id, version, categories, type,
+description and author of each program installed on the card. Firmware built-ins
+are absent from it, so `programs list` reports more programs than the manifest
+describes, and no description exists anywhere for the remainder.
+`ProgramManifest.missing` names the difference for a given device listing.
 
 ## Modulation knobs need an active source
 
@@ -68,6 +88,67 @@ A MIDI CC does not change `m` in `program state`. It contributes to the combined
 `o` output in `modulation status` while leaving the stored manual value alone,
 matching the documented `Manual + Modulation + MIDI` sum. To change the stored
 value, use `modulation set` over serial.
+
+## Absolute addressing needs a parked reference
+
+Because a CC is an offset, the same CC value means different things depending on
+where the manual values happen to sit. Driving every manual value to a known
+reference makes CC addressing absolute, and is the precondition for any
+repeatable automation; `Videomancer.park` does it. Two behaviours it has to work
+around, both observed on hardware:
+
+- **Writes must be paced.** An unpaced burst of 24 messages drops the LSB of
+  14-bit CC pairs, leaving MSB-only values such as `128`. `park` paces at a
+  documented `rate_hz`.
+- **The readback must settle.** Serial and MIDI are asynchronous, so the last
+  slot written is otherwise sampled before the device has applied it. `park`
+  waits, then polls, and only then compares.
+
+The reference itself must leave P12 open: P12 is the crossfader and gates the
+output even in programs whose `program info` names it `Null 12`, so parking it
+at zero blacks the device out entirely and every subsequent measurement is
+degenerate. `pyvmancer.const.PARK_REFERENCE` zeroes P1-P11 and opens P12.
+
+## `video status` flags are advisory
+
+The top-level `locked` flag tracks **genlock**, so it reads false whenever the
+timing is overridden even though the input is fine. The selected input's own
+sub-status (`hdmi`/`analog`) is authoritative in both directions, which is what
+`VideoStatus.source_locked` reads.
+
+Both are still only advisory. The firmware reports `hdmi.connected: false` while
+passing video perfectly, and reports a locked input while passing nothing at
+all. Nothing the device says proves frames are arriving; only observing the
+output does, which is the caller's job — `pyvmancer` has no capture path.
+
+## Recovering an output that stopped passing frames
+
+Observed repeatedly: the input stops passing video while the device still
+reports the input locked. There is no reboot verb short of `reboot bootloader`,
+which enters the flashing state rather than restarting.
+
+| Recovery attempt | Disturbs the pipeline | Recovers |
+| --- | --- | --- |
+| `modulation reset` | no | - |
+| `video input <same>` | no | - |
+| `video timing <native>` | no | - |
+| `video timing <other>` | yes | no, the output dies |
+| `video timing <other>` then `<native>` | yes | yes |
+
+Bouncing the timing to a standard the genlocked source cannot satisfy and then
+back re-initialises the output raster. `ShellClient.resync` performs it. An
+external capture measurement of one such recovery took output motion from
+`0.00000` to `0.02802` with no power cycle; that figure came from a capture card
+on one rig and nothing in `pyvmancer` depends on it.
+
+Three consequences. Which alternate standard to bounce through is a property of
+the source and sink, not of the device, so `resync` discovers the accepted set
+from the `video timing` usage string and takes an `alternate` argument. A timing
+change also drops the input selection, so it is reasserted afterwards. And the
+lock flags lag the signal, so the result is polled rather than sampled once.
+
+The bounce leaves `overridden: true`: the device no longer follows a source
+format change until the timing is set back or the device is restarted.
 
 ## Program inventory
 
