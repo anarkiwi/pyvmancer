@@ -36,7 +36,7 @@ from .programs import MANIFEST_PATH, ProgramEntry, ProgramManifest
 from .shell import Reply, ShellClient, encode_preset, parse_line
 from .video import VideoStatus
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 __all__ = [
     "CROSSFADER_PARAM",

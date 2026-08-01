@@ -39,6 +39,10 @@ COMBINED_KEYS = ("o", "out", "output", "combined")
 MANUAL_KEYS = ("m", "manual")
 #: Default seconds to wait after a timing change before re-reading the lock flags.
 RESYNC_SETTLE = 3.5
+#: ``fs hash`` throughput measured on hardware, bytes per second.
+HASH_BYTES_PER_SECOND = 79_000
+#: Headroom over the measured hash rate, for a slower card or a busier device.
+HASH_TIMEOUT_FACTOR = 4.0
 
 
 def decoded_limit(payload_max):
@@ -547,24 +551,38 @@ class ShellClient:
         except (VmancerError, ValueError, TypeError):
             return decoded_limit(READ_CHUNK)
 
-    def hash_file(self, path):
+    def hash_timeout(self, size):
+        """Deadline for hashing ``size`` bytes, from the measured device throughput."""
+        return max(self.timeout, HASH_TIMEOUT_FACTOR * int(size) / HASH_BYTES_PER_SECOND)
+
+    def hash_file(self, path, timeout=None):
         """Device-computed ``{"hash": <sha256 hex>, "size": n}`` for a file.
 
         Advertised as ``fs_hash`` in ``fs caps``; the digest is the natural cache
-        key for anything derived from a program binary.
+        key for anything derived from a program binary. ``timeout`` defaults to a
+        deadline derived from the file's size, since hashing is far from instant.
         """
-        return self.command("fs", "hash", _check_path(path)).json()
+        target = _check_path(path)
+        if timeout is None:
+            timeout = self.hash_timeout(self.stat(target).get("size", 0))
+        return self.command("fs", "hash", target, timeout=timeout).json()
 
     def program_manifest(self, path=MANIFEST_PATH):
         """Parsed program library manifest, covering SD-installed programs only."""
         return ProgramManifest.from_bytes(self.read_file(path))
 
     def write_file(self, path, data, chunk=WRITE_CHUNK):
-        """Write bytes to a file in base64 chunks."""
+        """Write bytes to a file in base64 chunks.
+
+        The chunk is bounded so the rendered command, encoded payload included,
+        stays inside the shell's line limit however long the path is.
+        """
         target = _check_path(path)
         payload = bytes(data)
-        for offset in range(0, len(payload), chunk):
-            encoded = base64.b64encode(payload[offset : offset + chunk]).decode("ascii")
+        overhead = len(f"fs write {target} {len(payload)} ")
+        limit = min(chunk, decoded_limit(SHELL_MAX_LINE - overhead))
+        for offset in range(0, len(payload), limit):
+            encoded = base64.b64encode(payload[offset : offset + limit]).decode("ascii")
             self._ok("fs", "write", target, offset, encoded)
         return self
 
