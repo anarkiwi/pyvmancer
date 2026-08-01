@@ -5,6 +5,33 @@ All notable changes to this project are documented here. The format follows
 [semantic](https://semver.org/), with the 0.x caveat that the public API may
 still move between minor releases.
 
+## [0.2.1] - 2026-08-01
+
+Patch: a bug fix and a defensive bound. No API removed; `hash_file` gained an
+optional argument.
+
+### Fixed
+
+- `ShellClient.hash_file` inherited the 5.0s default command timeout, but the
+  device hashes at about 79 kB/s, so every program binary large enough to matter
+  raised `ShellTimeoutError`. Measured on hardware: 16526 B in 0.21s, 322934 B
+  in 3.98s, 439221 B in 5.40s — and binaries run 320-440 kB, so the largest
+  failed every time while the small manifest always worked, which is how it
+  shipped. `hash_file` now derives a deadline from the size `stat` reports
+  (`HASH_BYTES_PER_SECOND`, `HASH_TIMEOUT_FACTOR`, floored at the client's own
+  timeout) and takes an explicit `timeout=` for callers who know better.
+- `ShellClient.write_file` sized its chunks without accounting for the path and
+  offset in the command line, so a long enough path could push the rendered
+  command past the shell's 511-byte limit and raise `ValueError`. The chunk is
+  now bounded by the space the line actually leaves.
+
+### Audited, unchanged
+
+`read_file` issues many small commands, each carrying at most
+`decoded_limit(read_max_bytes)` bytes, so no single one approaches the default
+timeout; the same holds per chunk for `write_file`. `fs put` is not wrapped by
+this library, and `settings export` remains unwrapped per the firmware notes.
+
 ## [0.2.0] - 2026-08-01
 
 Minor bump: two fixes plus new, additive API. Nothing was removed or changed in

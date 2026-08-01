@@ -203,7 +203,12 @@ request must therefore ask for at most `read_max_bytes // 4 * 3` bytes, which is
 what `pyvmancer.shell.decoded_limit` computes.
 
 `fs caps` also advertises `fs_hash: 1`, for `fs hash <path>` →
-`{"hash": "<sha256 hex>", "size": n}`, computed on the device.
+`{"hash": "<sha256 hex>", "size": n}`, computed on the device at roughly 79 kB/s
+— slow enough that a program binary needs a size-derived timeout, which
+`ShellClient.hash_file` supplies. See [firmware-notes.md](firmware-notes.md).
+
+`fs write` carries base64 too, and the whole command line is capped at 511
+bytes, so a chunk must leave room for the path and offset beside its payload.
 
 `sd:/programs/manifest.json` lists the SD-installed program library:
 

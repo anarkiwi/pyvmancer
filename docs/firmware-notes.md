@@ -62,11 +62,29 @@ working on hardware, and `pyvmancer.shell.decoded_limit` derives the maximum.
 Both halves of this were wrong in 0.1.0: the whole envelope was base64-decoded,
 and the chunk size was in the wrong units, so no file read back correctly.
 
-## `fs hash` is the cheap way to key a cache
+## `fs hash` is the cheap way to key a cache, but it is not fast
 
 `fs caps` advertises `fs_hash: 1`, and `fs hash <path>` returns
 `{"hash": "<sha256 hex>", "size": n}` computed on the device, without moving the
 file over the 256-byte-per-chunk read path.
+
+It hashes at about **79 kB/s**, so the reply routinely takes longer than the
+shell client's 5.0s default timeout:
+
+| File | Size | Time | Rate |
+| --- | --- | --- | --- |
+| `manifest.json` | 16526 B | 0.21 s | 77.0 kB/s |
+| `blizzard.vmprog` | 322934 B | 3.98 s | 79.3 kB/s |
+| `combing.vmprog` | 439221 B | 5.40 s | 79.4 kB/s |
+
+Program binaries run 320-440 kB, so most exceed a 5-second deadline and the
+largest exceed it every time; only the small manifest fits.
+`ShellClient.hash_file` therefore derives its timeout from the size `fs stat`
+reports, at `HASH_BYTES_PER_SECOND` with `HASH_TIMEOUT_FACTOR` of headroom for a
+slower card, and still accepts an explicit `timeout=`.
+
+Commands whose payload is chunked need none of this: `fs read` and `fs write`
+each carry at most a few hundred bytes, so they finish well inside the default.
 
 ## The program manifest covers only SD-installed programs
 

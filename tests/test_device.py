@@ -321,7 +321,8 @@ def test_park_argument_validation(vm, kwargs, match):
 def test_device_knowledge_delegation(vm, fakes):
     """Manifest, digest, video state and resync all reach the shell client."""
     script_file(fakes[1], MANIFEST_PATH, json.dumps({"version": "1.0.2", "programs": []}).encode())
-    fakes[1].on("fs hash sd:/programs/x.vmprog", '{"hash":"deadbeef","size":32}')
+    fakes[1].on("fs stat sd:/programs/x.vmprog", '{"size":322934}')
+    fakes[1].on("fs hash sd:/programs/x.vmprog", '{"hash":"deadbeef","size":322934}')
     fakes[1].on("video status", '{"input":"analog","timing":"PAL","analog":{"locked":true}}')
     fakes[1].on_error("video timing", 2, "usage: video timing <NTSC|PAL>")
     assert vm.program_manifest().version == "1.0.2"
