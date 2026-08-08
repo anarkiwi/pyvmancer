@@ -6,6 +6,9 @@ serial command guide. See ``docs/protocol.md`` for provenance of each table.
 
 from enum import Enum, IntEnum
 
+#: Package version. Lives here so leaf modules can read it without importing the package.
+VERSION = "0.2.1"
+
 USB_VID = 0x16D0
 USB_PID = 0x14DB
 USB_MANUFACTURER = "LZX Industries"

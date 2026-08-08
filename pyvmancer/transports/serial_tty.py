@@ -3,6 +3,16 @@
 from ..errors import TransportError, TransportUnavailableError
 from .base import ByteTransport
 
+#: Seconds to let a write block before giving up.
+#:
+#: The device stops draining the link while it commits a bulk transfer to the
+#: SD card, and those pauses run past two seconds when ``fs put`` streams a
+#: program-sized payload into a directory that already holds the whole library.
+#: Abandoning a write mid-payload strands the device consuming the link as file
+#: content, so this is generous on purpose; the shell's own reply deadlines are
+#: what bound a genuinely unresponsive device.
+WRITE_TIMEOUT = 30.0
+
 
 class SerialTransport(ByteTransport):
     """Byte stream over a :mod:`pyserial` port.
@@ -11,14 +21,14 @@ class SerialTransport(ByteTransport):
     because pyserial requires one.
     """
 
-    def __init__(self, port, baudrate=115200):
+    def __init__(self, port, baudrate=115200, write_timeout=WRITE_TIMEOUT):
         try:
             import serial
         except ImportError as err:
             raise TransportUnavailableError("pyserial is not installed") from err
         self._port_name = port
         try:
-            self._port = serial.Serial(port, baudrate=baudrate, timeout=0, write_timeout=2.0)
+            self._port = serial.Serial(port, baudrate=baudrate, timeout=0, write_timeout=write_timeout)
         except Exception as err:
             raise TransportUnavailableError(f"cannot open {port}: {err}") from err
 

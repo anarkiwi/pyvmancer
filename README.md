@@ -78,6 +78,81 @@ vmancer resync                  # recover an output that stopped passing frames
 vmancer shell modulation status # run any raw shell command
 ```
 
+## Firmware upgrade
+
+LZX publishes firmware as GitHub releases on
+[`lzxindustries/videomancer-firmware`](https://github.com/lzxindustries/videomancer-firmware),
+tagged `videomancer/<version>`. `pyvmancer` resolves a release, downloads its
+UF2, validates it, and flashes it through the RP2040 bootloader.
+
+```sh
+vmancer firmware list                  # published releases, newest first
+vmancer firmware status                # running version vs the newest release
+vmancer firmware download 1.0.0-rc.46  # fetch and validate a UF2, no flashing
+vmancer firmware upgrade               # dry run: shows what would be flashed
+vmancer firmware upgrade --yes         # flash the latest release
+vmancer firmware upgrade 1.0.0-rc.40 --yes --force   # pin a version, or downgrade
+```
+
+`upgrade` is a dry run unless `--yes` is given. With `--yes` it issues
+`reboot bootloader`, waits for the UF2 volume to appear (mounting it with
+`udisksctl` if nothing automounted it), copies the image, then waits for the
+device to re-enumerate and reports the version it comes back on. Pass
+`--manual` when the unit was put into bootloader mode by hand (hold BOOT while
+powering on), which is the recovery path when the serial link is unusable, and
+`--volume` when the bootloader is already mounted somewhere.
+
+Allow minutes, not seconds: the image only reaches the device when the copy is
+flushed, and a 24 MB UF2 takes a while over a FAT mount. The device reboots
+itself once the last block lands, and the version it reports afterwards is the
+proof the flash took.
+
+```python
+import pyvmancer as vm
+
+vm.resolve_release("latest").version            # newest published version
+image = vm.inspect_uf2("videomancer-1.0.0-rc.46.uf2")
+image.blocks, image.families                    # validated before anything is written
+
+with vm.open_shell() as shell:
+    vm.upgrade("latest", shell=shell, report=print)
+```
+
+Every Videomancer release to date is flagged as a prerelease on GitHub, so
+`latest` includes prereleases; pass `--stable` / `stable_only=True` to refuse
+them. Set `GITHUB_TOKEN` if you hit the unauthenticated API rate limit.
+
+## Program library
+
+The FPGA programs ship separately from the firmware, tagged `programs/<version>`
+on the same repository. `pyvmancer` resolves a release, verifies the archive
+against its published `checksums.sha256`, and copies it onto the SD card.
+
+```sh
+vmancer library list               # published library releases
+vmancer library status             # newest release vs what is on the card
+vmancer library download 1.0.3     # fetch and verify an archive, no install
+vmancer library install            # dry run: shows what would be installed
+vmancer library install --yes      # install the latest release
+vmancer library install --yes --force   # re-upload files already present
+```
+
+```python
+import pyvmancer as vm
+
+with vm.open_shell() as shell:
+    vm.install("latest", shell=shell, report=print)
+```
+
+Files already on the card at the archive's size are skipped, so an interrupted
+run resumes by re-running it. The upload uses `fs put`, the shell's raw
+streaming path: about 157 kB/s, so a full 14 MB library takes about 90 seconds.
+The base64 `fs write` path manages roughly 3 kB/s and is only for small files.
+
+**Restart the device after installing.** The program index is built at boot, so
+newly installed programs are not listed — and cannot be loaded — until the unit
+is power cycled.
+
 ## Permissions
 
 MIDI needs read/write on `/dev/snd/midiC*D*` (usually granted by a desktop ACL);

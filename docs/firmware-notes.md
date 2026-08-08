@@ -86,6 +86,61 @@ slower card, and still accepts an explicit `timeout=`.
 Commands whose payload is chunked need none of this: `fs read` and `fs write`
 each carry at most a few hundred bytes, so they finish well inside the default.
 
+## `fs put` is the only usable upload path, and it owns the link
+
+`fs write` carries base64 inside the command line, so it moves about 96 bytes
+per command — roughly 3 kB/s, or days for a 14 MB program library. `fs put` is
+the alternative: `fs put <path> <size>` answers `{"put":"ready","size":n}`, the
+device then takes exactly `size` **raw** bytes off the link, and answers
+`{"put":"ok","written":n}`. Measured at 157-166 kB/s, byte-exact on a payload
+covering every byte value.
+
+The hazard is that between `ready` and the final byte the device treats
+*everything* arriving as file content. A client that gives up mid-payload leaves
+the device consuming subsequent commands as data: `fs stat` gets no reply, and
+the only ways out are feeding it the promised byte count or a power cycle. Two
+things make that easy to trigger, both fixed in `pyvmancer`:
+
+- **The device stalls while committing to the card**, past pyserial's old 2.0s
+  `write_timeout`, when a program-sized payload lands in a directory that already
+  holds the library. Root-directory puts never stalled. The transports now allow
+  `serial_tty.WRITE_TIMEOUT` (30s) for a blocked write.
+- **Sustained puts can drop the USB link.** One run re-enumerated after about
+  7 MB, surfacing as `EIO`. The unit recovers on its own, so
+  `library.install_library` reconnects and resumes; a later full run of the same
+  14 MB completed with no drops, so it is intermittent rather than a hard limit.
+
+Note also that a bare `fs put` or `fs write` with no arguments answers
+`unknown fs subcommand`, which reads like the command is missing. Both exist;
+the message is just a poor usage error.
+
+## `fs hash` returns wrong digests on `1.0.0-rc.46`
+
+Checked against the published program archive as ground truth: `fs read` returns
+bytes matching the upstream file exactly, while `fs hash` reports a different
+sha256 for the same path, with the same size. Both `manifest.json` (2918 B) and
+`bleach.vmprog` (318786 B) disagreed.
+
+So the cheap cache key described above is not trustworthy on this firmware, and
+`ShellClient.hash_file` should not be relied on until it is confirmed fixed.
+`library.install_library` compares sizes and re-reads the landed size instead.
+
+## `fs ls` pages five at a time and repeats the last entry
+
+A full page arrives as `{"entries":[...],"more":true,"next":n}`; the final short
+page arrives as a bare array whose last entry is duplicated. A root listing with
+one directory in it returns that directory twice. `ShellClient.listdir` pages
+and de-duplicates by name; `ls` still returns the raw reply.
+
+## The program index is built at boot
+
+Programs installed onto the card do not appear in `programs list` and cannot be
+loaded — `program load` answers `[6] program not found` — until the unit is
+restarted. Observed with a program whose file was byte-identical to the
+published archive while a neighbouring one, present at the previous boot, loaded
+fine. There is no software restart short of `reboot bootloader`, so installing
+programs means power cycling afterwards.
+
 ## The program manifest covers only SD-installed programs
 
 `sd:/programs/manifest.json` carries the name, id, version, categories, type,
@@ -174,6 +229,52 @@ format change until the timing is set back or the device is restarted.
 (`Colorbars`, `Passthru`), and some published names are absent (`Fauxtress`,
 `Moire`, `Mycelium`, `Perlin`). `pyvmancer.const.EMBEDDED_PROGRAMS` is a
 convenience list only; call `programs list`.
+
+## Upgrades go through an RP2040 UF2 bootloader
+
+`help` advertises no firmware-update verb; the only route is `reboot bootloader`,
+which does not restart the device but drops it into the flashing state. The
+published images confirm what that state is: the UF2 header of
+`videomancer-1.0.0-rc.46.uf2` carries family id `0xe48bff56` (RP2040) at flash
+base `0x10000000`, 47774 blocks for 12230144 bytes of payload in a 24460288-byte
+file. So the unit re-enumerates as a standard RP2040 BOOTSEL mass-storage volume
+and the image is installed by copying it there.
+
+Two consequences for anything automating this. The bootloader reboots the
+instant the last block lands, so the write, the flush and the close can all fail
+with the volume vanishing underneath them — once every byte is delivered that is
+the expected ending, not an error, which is what `firmware.flash_uf2` encodes.
+And the volume is identified by the UF2 spec's `INFO_UF2.TXT` marker rather than
+by an `RPI-RP2` label, so a relabelled or vendor-customised bootloader still
+matches.
+
+Verified end to end on hardware, rc.40 to rc.46. Three things that only showed up
+against the real bootloader:
+
+- **The FAT volume is a partition.** The mass-storage interface reports
+  `/dev/sdc`, but the `RPI-RP2` volume is `/dev/sdc1`; udisks rejects the disk
+  node with "not a mountable filesystem". `firmware.volume_nodes` resolves the
+  partition from sysfs.
+- **The copy is not the flash.** Writing to a page-cached vfat mount returns long
+  before the data reaches the device: the file listed at its full 24460288 bytes
+  while the unit was still enumerated as `2e8a:0003 RP2 Boot`. The transfer
+  completes at `fsync`, which takes minutes for a 24 MB image, and the device
+  reboots only then. Anything driving this needs a timeout in minutes, and the
+  proof of a successful flash is the version read back afterwards, not the write
+  returning.
+- **Mounting needs an authorization a headless session lacks.** udisks answers
+  `NotAuthorizedCanObtain` with no way to prompt. `upgrade(volume=...)` /
+  `--volume` takes a mount point made by other means.
+
+## Every published Videomancer release is a prerelease
+
+`lzxindustries/videomancer-firmware` carries several products — `videomancer`,
+`tbc2`, `diver`, `connect`, `programs` — tagged `<product>/<version>`. All 34
+Videomancer releases are flagged `prerelease: true` on GitHub, so the repository's
+"latest release" endpoint never returns one; it answers with whichever other
+product most recently shipped a stable build. Videomancer releases have to be
+selected by tag prefix and ordered by semver precedence, which is also what keeps
+`1.0.0-rc.46` ahead of `1.0.0-rc.9`. `firmware.resolve_release` does both.
 
 ## MIDI byte counts
 

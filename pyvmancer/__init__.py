@@ -10,6 +10,7 @@ from .const import (
     PARAM_MIN,
     PARK_REFERENCE,
     SWEEP_STEPS,
+    VERSION,
     LogLevel,
     Operator,
     OperatorCategory,
@@ -25,24 +26,50 @@ from .device import ProgramParameter, Videomancer, open_midi, open_shell
 from .discovery import DeviceInfo, find_device, find_devices
 from .errors import (
     DeviceNotFoundError,
+    FirmwareError,
     ShellError,
     ShellTimeoutError,
     TransportError,
     TransportUnavailableError,
     VmancerError,
 )
+from .firmware import (
+    FIRMWARE_PRODUCT,
+    FIRMWARE_REPO,
+    Release,
+    Uf2Image,
+    inspect_uf2,
+    list_releases,
+    resolve_release,
+    upgrade,
+    version_key,
+)
+from .library import (
+    LIBRARY_PRODUCT,
+    LibraryEntry,
+    download_library,
+    install,
+    install_library,
+    library_entries,
+    resolve_library,
+)
 from .midi import MidiController
 from .programs import MANIFEST_PATH, ProgramEntry, ProgramManifest
 from .shell import Reply, ShellClient, encode_preset, parse_line
 from .video import VideoStatus
 
-__version__ = "0.2.1"
+__version__ = VERSION
 
 __all__ = [
     "CROSSFADER_PARAM",
     "DeviceInfo",
     "DeviceNotFoundError",
     "EMBEDDED_PROGRAMS",
+    "FIRMWARE_PRODUCT",
+    "FIRMWARE_REPO",
+    "FirmwareError",
+    "LIBRARY_PRODUCT",
+    "LibraryEntry",
     "LogLevel",
     "MANIFEST_PATH",
     "MidiController",
@@ -60,6 +87,7 @@ __all__ = [
     "ProgramManifest",
     "ProgramParameter",
     "PresetBank",
+    "Release",
     "Reply",
     "SWEEP_STEPS",
     "ShellClient",
@@ -68,17 +96,28 @@ __all__ = [
     "TransportError",
     "TransportState",
     "TransportUnavailableError",
+    "Uf2Image",
     "VideoStatus",
     "Videomancer",
     "VmancerError",
     "__version__",
     "classify_param",
+    "download_library",
     "encode_preset",
     "find_device",
     "find_devices",
+    "inspect_uf2",
+    "install",
+    "install_library",
+    "library_entries",
+    "list_releases",
     "open_midi",
     "open_shell",
     "param_kind",
     "parse_line",
+    "resolve_library",
     "resolve_operator",
+    "resolve_release",
+    "upgrade",
+    "version_key",
 ]

@@ -11,6 +11,7 @@ from pyvmancer.programs import MANIFEST_PATH
 from pyvmancer.shell import (
     ERROR_TAG_MASK,
     HASH_TIMEOUT_FACTOR,
+    PUT_MAX_BYTES,
     READ_CHUNK,
     WRITE_CHUNK,
     Reply,
@@ -21,7 +22,7 @@ from pyvmancer.shell import (
     parse_line,
 )
 
-from .conftest import FakeByteTransport, script_file
+from .conftest import FakeByteTransport, reply_line, script_file
 
 # pylint: disable=protected-access
 
@@ -610,6 +611,118 @@ def test_write_file_empty(shell, byte_transport):
     """Writing nothing issues no commands."""
     shell.write_file("sd:/w.bin", b"")
     assert byte_transport.written == []
+
+
+def test_write_file_accepts_the_written_count_reply(shell, byte_transport):
+    """``1.0.0-rc.46`` answers ``fs write`` with a count where earlier builds said ok."""
+    byte_transport.on("fs write sd:/w.bin 0 AAEC", json.dumps({"written": 3}))
+    assert shell.write_file("sd:/w.bin", bytes(range(3))) is shell
+
+
+def test_write_file_rejects_a_short_write(shell, byte_transport):
+    """A count below what was sent means the file on the card is incomplete."""
+    byte_transport.on("fs write sd:/w.bin 0 AAEC", json.dumps({"written": 1}))
+    with pytest.raises(VmancerError, match="wrote 1 of 3"):
+        shell.write_file("sd:/w.bin", bytes(range(3)))
+
+
+def test_write_file_rejects_an_unrecognised_reply(shell, byte_transport):
+    """Neither ok nor a count is a reply this client can act on."""
+    byte_transport.on("fs write sd:/w.bin 0 AAEC", "maybe")
+    with pytest.raises(VmancerError, match="expected ok or a written count"):
+        shell.write_file("sd:/w.bin", bytes(range(3)))
+
+
+def test_written_count_needs_a_count_field(shell, byte_transport):
+    """A JSON reply without a count proves nothing about what landed."""
+    byte_transport.on("fs write sd:/w.bin 0 AAEC", json.dumps({"ok": True}))
+    with pytest.raises(VmancerError, match="carries no written count"):
+        shell.write_file("sd:/w.bin", bytes(range(3)))
+
+
+def _script_put(byte_transport, path, size, written=None, limit=1 << 20):
+    """Script a whole ``fs put``: the ready handshake then the completion reply.
+
+    Both lines answer the handshake command, because the payload itself is raw
+    bytes rather than a command the fake could key on.
+    """
+    byte_transport.on("fs caps", json.dumps({"put_max_bytes": limit}))
+    byte_transport.on_lines(
+        f"fs put {path} {size}",
+        [
+            reply_line("fs", json.dumps({"put": "ready", "size": size})),
+            reply_line("fs", json.dumps({"put": "ok", "written": size if written is None else written})),
+        ],
+    )
+
+
+def test_put_file_streams_the_payload_raw(shell, byte_transport):
+    """After the ready handshake the payload goes down the link as raw bytes."""
+    data = bytes(range(32, 127)) * 2
+    _script_put(byte_transport, "sd:/p.bin", len(data))
+    assert shell.put_file("sd:/p.bin", data) is shell
+    assert data in bytes(byte_transport.raw)
+    assert base64.b64encode(data) not in bytes(byte_transport.raw)
+
+
+def test_put_file_requires_the_ready_handshake(shell, byte_transport):
+    """Streaming before the device is ready would write payload into the command stream."""
+    byte_transport.on("fs caps", json.dumps({"put_max_bytes": 1 << 20}))
+    byte_transport.on("fs put sd:/p.bin 3", json.dumps({"put": "busy"}))
+    with pytest.raises(VmancerError, match="did not report ready"):
+        shell.put_file("sd:/p.bin", b"abc")
+
+
+def test_put_file_refuses_a_payload_over_the_device_limit(shell, byte_transport):
+    """``fs caps`` bounds one transfer; a larger file has to be split by the caller."""
+    byte_transport.on("fs caps", json.dumps({"put_max_bytes": 16}))
+    with pytest.raises(ValueError, match="exceeds the device limit"):
+        shell.put_file("sd:/p.bin", bytes(32))
+
+
+def test_put_file_checks_the_written_count(shell, byte_transport):
+    """A short put leaves a truncated file behind."""
+    _script_put(byte_transport, "sd:/p.bin", 3, written=1)
+    with pytest.raises(VmancerError, match="wrote 1 of 3"):
+        shell.put_file("sd:/p.bin", b"abc")
+
+
+def test_put_timeout_scales_with_payload_size(shell):
+    """A 14 MB library must not be judged against a five second deadline."""
+    assert shell.put_timeout(4_000_000) > shell.put_timeout(4_000)
+
+
+def test_put_max_bytes_falls_back_when_caps_are_unreadable(shell, byte_transport):
+    """A device that will not answer ``fs caps`` still gets a sane bound."""
+    byte_transport.on("fs caps", "not json")
+    assert shell.put_max_bytes() == PUT_MAX_BYTES
+
+
+def test_listdir_follows_pagination(shell, byte_transport):
+    """Full pages arrive as an envelope naming the next offset."""
+    page = {
+        "entries": [{"name": f"f{n}", "type": "file", "size": n} for n in range(5)],
+        "more": True,
+        "next": 5,
+    }
+    tail = [{"name": "f5", "type": "file", "size": 5}]
+    byte_transport.on("fs ls sd:/d", json.dumps(page))
+    byte_transport.on("fs ls sd:/d 5", json.dumps(tail))
+    assert [e["name"] for e in shell.listdir("sd:/d")] == ["f0", "f1", "f2", "f3", "f4", "f5"]
+
+
+def test_listdir_drops_the_repeated_tail_entry(shell, byte_transport):
+    """The firmware repeats the last entry of a short page."""
+    entry = {"name": "programs", "type": "dir", "size": 0}
+    byte_transport.on("fs ls sd:/", json.dumps([entry, entry]))
+    assert [e["name"] for e in shell.listdir("sd:/")] == ["programs"]
+
+
+def test_listdir_stops_when_the_next_offset_does_not_advance(shell, byte_transport):
+    """A next offset that never moves would page forever."""
+    page = {"entries": [{"name": "a", "type": "file", "size": 1}], "more": True, "next": 0}
+    byte_transport.on("fs ls sd:/d", json.dumps(page))
+    assert [e["name"] for e in shell.listdir("sd:/d")] == ["a"]
 
 
 def test_close_and_context_manager():
