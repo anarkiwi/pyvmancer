@@ -311,34 +311,47 @@ def _run_install(args, release, releases):
     return 0
 
 
+def _run_devices(_args):
+    """List attached units and their device nodes."""
+    _print_json([vars_of(d) for d in find_devices()])
+    return 0
+
+
+def _run_operators(_args):
+    """List the modulation operators and their ids."""
+    _print_json(
+        {
+            info.name: {
+                "id": int(info.operator),
+                "glyph": info.glyph,
+                "category": info.category.value,
+                "per_line": info.per_line,
+                "transport": info.transport.value,
+            }
+            for info in OPERATORS.values()
+        }
+    )
+    return 0
+
+
+#: Subcommand handlers; anything unlisted needs the serial link.
+HANDLERS = {
+    "devices": _run_devices,
+    "operators": _run_operators,
+    "firmware": _run_firmware,
+    "library": _run_library,
+    "set": _run_midi,
+    "trigger": _run_midi,
+    "preset": _run_midi,
+    "clock": _run_midi,
+}
+
+
 def main(argv=None):
     """Entry point for the ``vmancer`` console script."""
     args = build_parser().parse_args(argv)
     try:
-        if args.command == "devices":
-            _print_json([vars_of(d) for d in find_devices()])
-            return 0
-        if args.command == "operators":
-            _print_json(
-                {
-                    info.name: {
-                        "id": int(info.operator),
-                        "glyph": info.glyph,
-                        "category": info.category.value,
-                        "per_line": info.per_line,
-                        "transport": info.transport.value,
-                    }
-                    for info in OPERATORS.values()
-                }
-            )
-            return 0
-        if args.command == "firmware":
-            return _run_firmware(args)
-        if args.command == "library":
-            return _run_library(args)
-        if args.command in ("set", "trigger", "preset", "clock"):
-            return _run_midi(args)
-        return _run_shell(args)
+        return HANDLERS.get(args.command, _run_shell)(args)
     except (VmancerError, ValueError) as err:
         print(f"error: {err}", file=sys.stderr)
         return 1
