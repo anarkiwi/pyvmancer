@@ -43,6 +43,16 @@ RESYNC_SETTLE = 3.5
 HASH_BYTES_PER_SECOND = 79_000
 #: Headroom over the measured hash rate, for a slower card or a busier device.
 HASH_TIMEOUT_FACTOR = 4.0
+#: Bytes per write while streaming an ``fs put`` payload.
+PUT_CHUNK = 4096
+#: ``fs put`` throughput measured on hardware, bytes per second.
+PUT_BYTES_PER_SECOND = 157_000
+#: Headroom over the measured put rate, for a slower card or a busier device.
+PUT_TIMEOUT_FACTOR = 4.0
+#: ``fs caps`` ``put_max_bytes`` default, bounding one ``fs put`` payload.
+PUT_MAX_BYTES = 8 << 20
+#: Entries one ``fs ls`` page returns.
+LS_PAGE = 5
 
 
 def decoded_limit(payload_max):
@@ -69,6 +79,27 @@ def _slot_vector(payload, keys):
         elif all(isinstance(slot, (int, float)) and not isinstance(slot, bool) for slot in value):
             return scaling.clamp(value)
     return None
+
+
+def written_count(reply, expected, command):
+    """Byte count acknowledged by a write, whichever form the firmware uses.
+
+    ``1.0.0-rc.37`` and ``rc.40`` answer ``fs write`` with a bare ``ok``;
+    ``rc.46`` answers with ``{"written": n}``, and ``fs put`` answers
+    ``{"put": "ok", "written": n}``. A short count is a failed write.
+    """
+    if reply.ok:
+        return expected
+    try:
+        payload = reply.json()
+    except VmancerError as err:
+        raise VmancerError(f"{command}: expected ok or a written count, got {reply.payload!r}") from err
+    written = payload.get("written")
+    if written is None:
+        raise VmancerError(f"{command}: reply carries no written count: {reply.payload!r}")
+    if int(written) != expected:
+        raise VmancerError(f"{command}: device wrote {written} of {expected} bytes")
+    return int(written)
 
 
 def decode_error_code(code):
@@ -174,10 +205,16 @@ class ShellClient:
         return self._await_reply(command, self.timeout if timeout is None else timeout)
 
     def _await_reply(self, command, timeout):
-        """Read lines until a reply or error arrives, collecting log output."""
+        """Read lines until a reply or error arrives, collecting log output.
+
+        Lines are taken one at a time rather than drained in a batch, so
+        whatever follows a reply in the same read stays buffered for the next
+        call instead of being dropped with the batch.
+        """
         deadline = time.monotonic() + timeout
         while True:
-            for line in self._drain_lines():
+            line = self._pop_line()
+            while line is not None:
                 kind, value = parse_line(line)
                 if kind == "reply":
                     return value
@@ -185,6 +222,7 @@ class ShellClient:
                     raise ShellError(value.code, value.message, command)
                 if value:
                     self.log_lines.append(value)
+                line = self._pop_line()
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise ShellTimeoutError(command, timeout)
@@ -192,16 +230,14 @@ class ShellClient:
             if chunk:
                 self._buffer.extend(chunk)
 
-    def _drain_lines(self):
-        """Pop complete newline-delimited lines out of the read buffer."""
-        lines = []
-        while True:
-            index = self._buffer.find(b"\n")
-            if index < 0:
-                return lines
-            raw = bytes(self._buffer[:index])
-            del self._buffer[: index + 1]
-            lines.append(raw.decode("ascii", "replace"))
+    def _pop_line(self):
+        """Pop one complete newline-delimited line, or ``None`` when none is buffered."""
+        index = self._buffer.find(b"\n")
+        if index < 0:
+            return None
+        raw = bytes(self._buffer[:index])
+        del self._buffer[: index + 1]
+        return raw.decode("ascii", "replace")
 
     def _ok(self, *parts, accept=()):
         """Run a command and assert it acknowledged.
@@ -575,16 +611,87 @@ class ShellClient:
         """Write bytes to a file in base64 chunks.
 
         The chunk is bounded so the rendered command, encoded payload included,
-        stays inside the shell's line limit however long the path is.
+        stays inside the shell's line limit however long the path is. That caps
+        the payload near 96 bytes per command, so this is for small files;
+        :meth:`put_file` is the path for anything program-sized.
         """
         target = _check_path(path)
         payload = bytes(data)
         overhead = len(f"fs write {target} {len(payload)} ")
         limit = min(chunk, decoded_limit(SHELL_MAX_LINE - overhead))
         for offset in range(0, len(payload), limit):
-            encoded = base64.b64encode(payload[offset : offset + limit]).decode("ascii")
-            self._ok("fs", "write", target, offset, encoded)
+            part = payload[offset : offset + limit]
+            encoded = base64.b64encode(part).decode("ascii")
+            reply = self.command("fs", "write", target, offset, encoded)
+            written_count(reply, len(part), f"fs write {target}")
         return self
+
+    def put_timeout(self, size):
+        """Deadline for streaming ``size`` bytes, from the measured device throughput."""
+        return max(self.timeout, PUT_TIMEOUT_FACTOR * int(size) / PUT_BYTES_PER_SECOND)
+
+    def put_max_bytes(self):
+        """Largest payload one ``fs put`` accepts, as ``fs caps`` reports it."""
+        try:
+            return int(self.fs_caps().get("put_max_bytes", PUT_MAX_BYTES))
+        except (VmancerError, ValueError, TypeError):
+            return PUT_MAX_BYTES
+
+    def put_file(self, path, data, chunk=PUT_CHUNK, timeout=None):
+        """Upload a whole file with ``fs put``, the raw streaming path.
+
+        ``fs put <path> <size>`` answers ``{"put": "ready"}`` and the device then
+        takes exactly ``size`` bytes off the link as the payload, with no
+        encoding and no per-chunk commands. Measured at about 157 kB/s against
+        roughly 3 kB/s for the base64 ``fs write`` path, which is the difference
+        between minutes and days for a program library.
+
+        Once the handshake is answered the payload owns the link until its last
+        byte: the device takes anything else sent as file content, and a client
+        that abandons the transfer strands it consuming commands as payload,
+        recoverable only by feeding the promised byte count or power cycling.
+        Abandoning it is therefore what has to be avoided. The device stalls
+        while it commits to the card -- past two seconds when a program-sized
+        payload lands in a directory already holding the library -- so the
+        transports allow :data:`~pyvmancer.transports.serial_tty.WRITE_TIMEOUT`
+        for a blocked write rather than treating a stall as failure.
+        """
+        target = _check_path(path)
+        payload = bytes(data)
+        limit = self.put_max_bytes()
+        if len(payload) > limit:
+            raise ValueError(f"payload of {len(payload)} bytes exceeds the device limit of {limit}")
+        deadline = self.put_timeout(len(payload)) if timeout is None else timeout
+        state = self.command("fs", "put", target, len(payload), timeout=deadline).json()
+        if state.get("put") != "ready":
+            raise VmancerError(f"fs put {target}: device did not report ready: {state!r}")
+        for offset in range(0, len(payload), chunk):
+            self._transport.write(payload[offset : offset + chunk])
+        reply = self._await_reply(f"fs put {target}", deadline)
+        written_count(reply, len(payload), f"fs put {target}")
+        return self
+
+    def listdir(self, path=SHELL_PATH_PREFIX):
+        """Every entry in a directory, following ``fs ls`` pagination.
+
+        The firmware answers a full page as ``{"entries": [...], "more": true,
+        "next": n}`` and the final short page as a bare array whose last entry is
+        repeated, so entries are de-duplicated by name.
+        """
+        target = _check_path(path)
+        entries = {}
+        offset = 0
+        while True:
+            payload = self.command("fs", "ls", target, offset or None).json()
+            page = payload.get("entries", []) if isinstance(payload, dict) else payload
+            for entry in page:
+                entries.setdefault(entry.get("name"), entry)
+            if not isinstance(payload, dict) or not payload.get("more"):
+                return list(entries.values())
+            nxt = payload.get("next")
+            if nxt is None or nxt <= offset:
+                return list(entries.values())
+            offset = nxt
 
     def close(self):
         """Close the underlying transport."""

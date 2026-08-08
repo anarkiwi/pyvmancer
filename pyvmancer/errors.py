@@ -17,6 +17,10 @@ class TransportUnavailableError(TransportError):
     """Transport backend is not usable (missing library, permissions, no device node)."""
 
 
+class FirmwareError(VmancerError):
+    """A firmware release could not be resolved, downloaded, or flashed."""
+
+
 class ShellError(VmancerError):
     """Device returned a ``!<code>:<message>`` response.
 

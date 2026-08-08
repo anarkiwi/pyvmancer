@@ -10,6 +10,10 @@ import time
 from ..const import USB_PID, USB_VID
 from ..errors import DeviceNotFoundError, TransportError, TransportUnavailableError
 from .base import ByteTransport
+from .serial_tty import WRITE_TIMEOUT
+
+#: Bulk write deadline in milliseconds; see :data:`.serial_tty.WRITE_TIMEOUT`.
+WRITE_TIMEOUT_MS = int(WRITE_TIMEOUT * 1000)
 
 CDC_COMM_CLASS = 0x02
 CDC_DATA_CLASS = 0x0A
@@ -105,7 +109,7 @@ class UsbCdcTransport(ByteTransport):
         if self._claimed is None:
             raise TransportError("transport is closed")
         try:
-            self._out_ep.write(bytes(data), timeout=2000)
+            self._out_ep.write(bytes(data), timeout=WRITE_TIMEOUT_MS)
         except Exception as err:
             raise TransportError(f"USB bulk write failed: {err}") from err
 
