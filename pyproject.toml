@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pyvmancer"
-version = "0.2.1"
+version = "0.3.0"
 description = "Automate the LZX Industries Videomancer over USB MIDI and USB serial"
 readme = "README.md"
 license = "Apache-2.0"

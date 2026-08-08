@@ -5,7 +5,12 @@ All notable changes to this project are documented here. The format follows
 [semantic](https://semver.org/), with the 0.x caveat that the public API may
 still move between minor releases.
 
-## [Unreleased]
+## [0.3.0] - 2026-08-08
+
+Minor bump: two new subsystems and three fixes. The API is additive, but two of
+the fixes change behaviour a caller may have been relying on — `write_file`
+could not succeed at all on `1.0.0-rc.46` before this, and the transports now
+allow a blocked write thirty seconds rather than two.
 
 ### Added
 
