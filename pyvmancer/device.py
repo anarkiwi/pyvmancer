@@ -252,7 +252,7 @@ class Videomancer:
         return self.midi.select_preset(program)
 
     def load_program(self, name, settle=1.5):
-        """Load an FPGA program by name (serial only)."""
+        """Load an FPGA program by name or ``author/Name`` (serial only)."""
         result = self.shell.load_program(name, settle=settle)
         self._parameters = None
         return result
@@ -340,9 +340,13 @@ class Videomancer:
         """Parsed video input, timing and lock state (serial only)."""
         return self.shell.video_state()
 
-    def programs(self):
-        """List installed FPGA programs (serial only)."""
-        return self.shell.programs()
+    def programs(self, author=None):
+        """Installed FPGA programs: one author's, or all as qualified names (serial only)."""
+        return self.shell.programs(author)
+
+    def authors(self):
+        """Program authors the firmware can enumerate (serial only)."""
+        return self.shell.authors()
 
     def program_manifest(self):
         """Metadata for SD-installed programs; built-ins are absent (serial only)."""

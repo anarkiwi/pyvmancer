@@ -42,6 +42,10 @@ RESYNC_SETTLE = 3.5
 #: ``fs hash`` throughput measured on hardware, bytes per second.
 HASH_BYTES_PER_SECOND = 79_000
 #: Headroom over the measured hash rate, for a slower card or a busier device.
+#: Reply deadline for ``programs enumerate``, which rebuilds the list from the card.
+ENUMERATE_TIMEOUT = 60.0
+#: The author whose programs are listed and loaded without a prefix.
+DEFAULT_AUTHOR = "lzx"
 HASH_TIMEOUT_FACTOR = 4.0
 #: Bytes per write while streaming an ``fs put`` payload.
 PUT_CHUNK = 4096
@@ -189,6 +193,8 @@ class ShellClient:
         self.timeout = timeout
         self._buffer = bytearray()
         self.log_lines = []
+        self._author = None
+        self._enumerated = {}
 
     @property
     def transport(self):
@@ -297,23 +303,74 @@ class ShellClient:
         self._transport.write(b"reboot bootloader\n")
         return self
 
-    def programs(self):
-        """Every installed FPGA program name, following pagination if present."""
+    def authors(self):
+        """Program authors the firmware can enumerate (``programs authors``)."""
+        return list(self.command("programs", "authors").json().get("authors", []))
+
+    def enumerate_author(self, author):
+        """Make ``author`` the active author, returning the device's enumerate reply.
+
+        The command is skipped when the author is already active.
+        """
+        if author != self._author:
+            self._author = None
+            self._enumerated[author] = self.command(
+                "programs", "enumerate", author, timeout=ENUMERATE_TIMEOUT
+            ).json()
+            self._author = author
+        return self._enumerated[author]
+
+    def _active_programs(self):
+        """Names in the active author's list, following pagination."""
         names = []
         offset = 0
         while True:
             page = self.command("programs", "list", offset or None).json()
             names.extend(page.get("programs", []))
-            if not page.get("more"):
-                return names
             nxt = page.get("next")
-            if nxt is None or nxt <= offset:
+            if not page.get("more") or nxt is None or nxt <= offset:
                 return names
             offset = nxt
 
+    def _authors_or_none(self):
+        """Authors, or None on firmware without ``programs authors``."""
+        try:
+            return self.authors()
+        except ShellError:
+            return None
+
+    def programs(self, author=None):
+        """Program names for ``author``, or for every author when None.
+
+        Across authors, ``lzx`` names stay plain and the rest are ``author/Name``;
+        order is ``lzx`` first, then the other authors sorted. Firmware without
+        authors lists its single set unqualified.
+        """
+        if author is not None:
+            self.enumerate_author(author)
+            return self._active_programs()
+        authors = self._authors_or_none()
+        if authors is None:
+            return self._active_programs()
+        names = []
+        for name in sorted(authors, key=lambda a: (a != DEFAULT_AUTHOR, a)):
+            self.enumerate_author(name)
+            prefix = "" if name == DEFAULT_AUTHOR else f"{name}/"
+            names.extend(prefix + n for n in self._active_programs())
+        return names
+
     def load_program(self, name, settle=1.5):
-        """Load an FPGA program by name and wait for the load to settle."""
-        self._ok("program", "load", name)
+        """Load an FPGA program and wait for the load to settle.
+
+        ``name`` is ``Name`` for the ``lzx`` author or ``author/Name``; the author
+        is enumerated first unless already active.
+        """
+        author, slash, plain = name.partition("/")
+        if not slash:
+            author, plain = DEFAULT_AUTHOR, name
+        if author != self._author and (slash or self._authors_or_none() is not None):
+            self.enumerate_author(author)
+        self._ok("program", "load", plain)
         if settle:
             time.sleep(settle)
         return self

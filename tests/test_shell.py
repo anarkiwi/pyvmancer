@@ -9,6 +9,7 @@ from pyvmancer.const import PARAM_COUNT, PARAM_MAX, SHELL_MAX_LINE, PresetBank, 
 from pyvmancer.errors import ShellError, ShellTimeoutError, VmancerError
 from pyvmancer.programs import MANIFEST_PATH
 from pyvmancer.shell import (
+    ENUMERATE_TIMEOUT,
     ERROR_TAG_MASK,
     HASH_TIMEOUT_FACTOR,
     PUT_MAX_BYTES,
@@ -340,27 +341,121 @@ def test_set_source_resolves_operator_names(shell, byte_transport, source, code)
     assert byte_transport.last == f"modulation source 4 {code}"
 
 
+def legacy(byte_transport):
+    """Script firmware that predates ``programs authors``."""
+    return byte_transport.on_error("programs authors", 1, "unknown command")
+
+
+def multi_author(byte_transport, listings):
+    """Script ``programs authors`` plus an enumerate/list pair per author."""
+    byte_transport.on("programs authors", json.dumps({"count": len(listings), "authors": list(listings)}))
+    for author in listings:
+        byte_transport.on(f"programs enumerate {author}", json.dumps({"author": author}))
+    return byte_transport
+
+
 def test_programs_follows_pagination(shell, byte_transport):
     """Paginated listings are concatenated until ``more`` is false."""
+    legacy(byte_transport)
     byte_transport.on("programs list", '{"programs":["a","b"],"more":true,"next":2}')
     byte_transport.on("programs list 2", '{"programs":["c"],"more":false}')
     assert shell.programs() == ["a", "b", "c"]
+    assert "programs enumerate" not in " ".join(byte_transport.written)
 
 
 def test_programs_stops_on_non_advancing_cursor(shell, byte_transport):
     """A cursor that does not advance ends the walk instead of looping."""
+    legacy(byte_transport)
     byte_transport.on("programs list", '{"programs":["a"],"more":true,"next":0}')
     assert shell.programs() == ["a"]
 
 
 def test_programs_stops_on_missing_cursor(shell, byte_transport):
     """``more`` without ``next`` also ends the walk."""
+    legacy(byte_transport)
     byte_transport.on("programs list", '{"programs":["a"],"more":true}')
     assert shell.programs() == ["a"]
 
 
+def test_authors(shell, byte_transport):
+    """``programs authors`` is decoded to a list of names."""
+    multi_author(byte_transport, {"lzx": 0, "boneoh": 0})
+    assert shell.authors() == ["lzx", "boneoh"]
+
+
+def test_enumerate_author_uses_long_timeout_and_skips_when_active(shell, byte_transport):
+    """Enumerating allows the long deadline per call, and is skipped once active."""
+    byte_transport.on("programs enumerate lzx", '{"author":"lzx","count":3}')
+    seen = []
+    real = shell.command
+    shell.command = lambda *p, timeout=None: seen.append(timeout) or real(*p, timeout=timeout)
+    assert shell.enumerate_author("lzx")["count"] == 3
+    assert shell.enumerate_author("lzx")["count"] == 3
+    assert seen == [ENUMERATE_TIMEOUT]
+    assert shell.timeout == 0.2
+    assert byte_transport.written.count("programs enumerate lzx") == 1
+
+
+def test_programs_merges_authors_with_qualified_names(shell, byte_transport):
+    """lzx stays plain and sorts first; other authors are prefixed and sorted."""
+    multi_author(byte_transport, {"teletect": 0, "czartroniks": 0, "lzx": 0, "boneoh": 0})
+    lists = {
+        "lzx": '{"programs":["Teletext","Isotherm"]}',
+        "czartroniks": '{"programs":["Teletext"]}',
+        "boneoh": '{"programs":["x"]}',
+        "teletect": '{"programs":[]}',
+    }
+    byte_transport.author_lists = lists
+    assert shell.programs() == ["Teletext", "Isotherm", "boneoh/x", "czartroniks/Teletext"]
+    enumerated = [w for w in byte_transport.written if w.startswith("programs enumerate")]
+    assert enumerated == [f"programs enumerate {a}" for a in ("lzx", "boneoh", "czartroniks", "teletect")]
+
+
+def test_programs_for_one_author_is_plain_and_paged(shell, byte_transport):
+    """An explicit author returns unqualified names and pages within the author."""
+    multi_author(byte_transport, {"czartroniks": 0})
+    byte_transport.on("programs list", '{"programs":["a","b"],"more":true,"next":2}')
+    byte_transport.on("programs list 2", '{"programs":["c"],"more":false}')
+    assert shell.programs("czartroniks") == ["a", "b", "c"]
+
+
+def test_programs_skips_enumerate_for_active_author(shell, byte_transport):
+    """A second listing of the active author does not re-enumerate."""
+    multi_author(byte_transport, {"lzx": 0})
+    byte_transport.on("programs list", '{"programs":["a"]}')
+    shell.programs("lzx")
+    shell.programs("lzx")
+    assert byte_transport.written.count("programs enumerate lzx") == 1
+
+
+def test_load_qualified_program_enumerates_first(shell, byte_transport):
+    """``author/Name`` enumerates that author, then loads the plain name."""
+    multi_author(byte_transport, {"lzx": 0, "czartroniks": 0})
+    shell.load_program("czartroniks/Teletext", settle=0)
+    assert byte_transport.written[-2:] == ["programs enumerate czartroniks", "program load Teletext"]
+    shell.load_program("czartroniks/Other", settle=0)
+    assert byte_transport.written[-2:] == ["program load Teletext", "program load Other"]
+
+
+def test_load_plain_program_means_lzx(shell, byte_transport):
+    """A bare name selects lzx, switching back from another author."""
+    multi_author(byte_transport, {"lzx": 0, "czartroniks": 0})
+    shell.enumerate_author("czartroniks")
+    shell.load_program("Teletext", settle=0)
+    assert byte_transport.written[-2:] == ["programs enumerate lzx", "program load Teletext"]
+
+
+def test_load_on_legacy_firmware_loads_plain_name(shell, byte_transport):
+    """Without authors the name is loaded as given, with no enumerate."""
+    legacy(byte_transport)
+    shell.load_program("perlin", settle=0)
+    assert byte_transport.written[-1] == "program load perlin"
+    assert not any(w.startswith("programs enumerate") for w in byte_transport.written)
+
+
 def test_load_program_without_settle(shell, byte_transport):
     """Loading with no settle delay still issues the command."""
+    legacy(byte_transport)
     assert shell.load_program("perlin", settle=0) is shell
     assert byte_transport.last == "program load perlin"
 
@@ -368,6 +463,7 @@ def test_load_program_without_settle(shell, byte_transport):
 def test_load_program_settles(shell, byte_transport, monkeypatch):
     """The default settle delay is applied after the load command."""
     slept = []
+    legacy(byte_transport)
     monkeypatch.setattr("pyvmancer.shell.time.sleep", slept.append)
     shell.load_program("moire")
     assert byte_transport.last == "program load moire"

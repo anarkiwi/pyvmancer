@@ -66,10 +66,12 @@ def build_parser():
     clock.add_argument("--beats", type=float, default=4.0)
 
     sub.add_parser("status", help="query device status over serial")
-    sub.add_parser("programs", help="list installed FPGA programs over serial")
+    programs = sub.add_parser("programs", help="list installed FPGA programs over serial")
+    programs.add_argument("--author", help="list only this author's programs (default: all, qualified)")
+    sub.add_parser("authors", help="list program authors over serial")
     sub.add_parser("presets", help="list factory and user presets over serial")
 
-    load = sub.add_parser("load", help="load an FPGA program by name over serial")
+    load = sub.add_parser("load", help="load an FPGA program by name or author/Name over serial")
     load.add_argument("name")
 
     sub.add_parser("manifest", help="show the SD program manifest over serial")
@@ -158,7 +160,9 @@ def _run_shell(args):
         if args.command == "status":
             _print_json(shell.status())
         elif args.command == "programs":
-            _print_json(shell.programs())
+            _print_json(shell.programs(args.author))
+        elif args.command == "authors":
+            _print_json(shell.authors())
         elif args.command == "presets":
             _print_json(shell.presets())
         elif args.command == "load":

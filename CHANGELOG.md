@@ -5,6 +5,27 @@ All notable changes to this project are documented here. The format follows
 [semantic](https://semver.org/), with the 0.x caveat that the public API may
 still move between minor releases.
 
+## [0.4.0] - 2026-10-26
+
+Minor bump: program listing and loading become author-aware. `programs()` now
+returns programs from every author, with non-`lzx` names qualified as
+`author/Name`, where it previously saw only the active author.
+
+### Added
+
+- `ShellClient.authors()` and `ShellClient.enumerate_author(author)`, wrapping
+  `programs authors` and `programs enumerate`. Enumerating uses its own
+  `ENUMERATE_TIMEOUT` and is skipped when the author is already active.
+- `Videomancer.authors()`, `vmancer authors`, and `vmancer programs --author`.
+
+### Changed
+
+- `ShellClient.programs(author=None)` / `Videomancer.programs` list every author
+  (`lzx` first, then sorted; non-`lzx` names are `author/Name`), or one author's
+  plain names. Firmware without `programs authors` keeps the single paged list.
+- `load_program` accepts `author/Name`, enumerating that author first; a bare
+  name means `lzx`.
+
 ## [0.3.0] - 2026-08-08
 
 Minor bump: two new subsystems and three fixes. The API is additive, but two of
