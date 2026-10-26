@@ -211,6 +211,7 @@ def test_set_source_by_name(vm, fakes):
 def test_load_program_invalidates_parameter_cache(vm, fakes):
     """Loading a new program forces the next parameter query to re-fetch."""
     vm.parameters()
+    fakes[1].on_error("programs authors", 1, "unknown command")
     vm.load_program("perlin", settle=0)
     assert fakes[1].last == "program load perlin"
     vm.parameters()
@@ -245,6 +246,7 @@ def test_midi_delegation(vm, fakes):
 
 def test_shell_delegation(vm, fakes):
     """The facade forwards the serial-only calls to the shell client."""
+    fakes[1].on_error("programs authors", 1, "unknown command")
     fakes[1].on("programs list", '{"programs":["a"]}')
     fakes[1].on("program presets list", '{"factory":[]}')
     fakes[1].on("status", '{"product":"Videomancer"}')

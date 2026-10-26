@@ -145,7 +145,7 @@ The shell is single-threaded and expects one connected terminal at a time.
 | Group | Commands |
 | --- | --- |
 | general | `version`, `serial`, `status`, `help`, `language`, `reboot bootloader` |
-| programs | `programs list`, `program load`, `program info`, `program state`, `program stream` |
+| programs | `programs list`, `programs authors`, `programs enumerate`, `program load`, `program info`, `program state`, `program stream` |
 | presets | `program presets list/get/apply/save/delete/rename` |
 | modulation | `modulation status/source/set/reset/cc-map/latch`, `modulation audio status` |
 | video | `video status`, `video input`, `video timing` |
@@ -223,3 +223,16 @@ bytes, so a chunk must leave room for the path and offset beside its payload.
 `pyvmancer.programs.ProgramManifest` parses it. Coverage is partial: firmware
 built-in programs are not listed, so `programs list` is normally longer and
 those entries have no description available from any source.
+
+### Program authors
+
+Firmware `1.0.2-rc.5` lists and loads one author's programs at a time.
+`programs authors` returns `{"count","authors":[...]}`; `programs enumerate
+<author>` switches the active author and rebuilds the list, replying
+`{"author","skipped","count","before","overflow","active_author"}`. Large
+authors take longer than the default reply deadline, so `ShellClient` allows
+`ENUMERATE_TIMEOUT` for that command only. `programs list` and `program load`
+act on the active author. `ShellClient.programs()` visits every author (`lzx`
+first, then the rest sorted) and qualifies non-`lzx` names as `author/Name`, since
+the same name can exist under two authors; `load_program` accepts the same form.
+Firmware without `programs authors` is listed and loaded as a single set.

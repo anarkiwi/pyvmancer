@@ -80,6 +80,8 @@ class FakeByteTransport(ByteTransport):
         self.raw = bytearray()
         self.scripts = {}
         self.closed = False
+        self.author_lists = {}
+        self._author = None
         self._pending = bytearray()
 
     def on(self, command, payload, tag=None):
@@ -112,6 +114,10 @@ class FakeByteTransport(ByteTransport):
 
     def _response(self, command):
         """Return the encoded reply lines for one command."""
+        if command.startswith("programs enumerate "):
+            self._author = command.split(" ")[2]
+        if command == "programs list" and self._author in self.author_lists:
+            self.on(command, self.author_lists[self._author])
         lines = self.scripts.get(command)
         if lines is None:
             if self.default_payload is None:

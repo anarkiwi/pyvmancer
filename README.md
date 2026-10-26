@@ -70,8 +70,11 @@ vmancer devices                 # discover attached units and their device nodes
 vmancer operators               # list the 25 modulation operators
 vmancer set 1=0.5 7=on          # set parameters over MIDI
 vmancer preset 3                # recall a preset
-vmancer programs                # list installed FPGA programs
-vmancer load Isotherm           # load a program
+vmancer authors                 # list program authors
+vmancer programs                # all programs; non-lzx names are author/Name
+vmancer programs --author lzx   # one author's programs, plain names
+vmancer load Isotherm           # load an lzx program
+vmancer load czartroniks/Teletext   # load another author's program
 vmancer manifest                # SD program library metadata
 vmancer hash sd:/programs/x.vmprog
 vmancer resync                  # recover an output that stopped passing frames
