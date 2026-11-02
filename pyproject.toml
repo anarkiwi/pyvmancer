@@ -9,7 +9,7 @@ description = "Automate the LZX Industries Videomancer over USB MIDI and USB ser
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 authors = [{ name = "Josh Bailey", email = "josh@overlyspecific.com" }]
 keywords = ["lzx", "videomancer", "midi", "video-synthesis", "usb"]
 classifiers = [
@@ -50,7 +50,7 @@ include = ["pyvmancer*"]
 
 [tool.black]
 line-length = 110
-target-version = ["py311"]
+target-version = ["py312"]
 
 [tool.pytest.ini_options]
 addopts = "-n auto --cov=pyvmancer --cov-report=term-missing --cov-fail-under=85"
