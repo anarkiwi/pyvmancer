@@ -6,11 +6,12 @@ import os
 import sys
 
 from . import __version__, firmware, library
-from .diagnose import diagnose, diagnose_video, format_finding, report
+from .diagnose import diagnose, diagnose_latency, diagnose_video, format_finding, report
 from .const import OPERATORS, PARAM_COUNT
-from .device import open_midi, open_shell
+from .device import Videomancer, open_midi, open_shell
 from .discovery import find_devices
 from .errors import VmancerError
+from .latency import DEFAULT_RATES, measure_latency
 
 
 def _param_value(text):
@@ -34,6 +35,11 @@ def _assignment(text):
     if not 1 <= param <= PARAM_COUNT:
         raise argparse.ArgumentTypeError(f"parameter must be 1..{PARAM_COUNT}, got {param}")
     return param, _param_value(value)
+
+
+def _numbers(kind):
+    """Parse a comma-separated list of ``kind``."""
+    return lambda text: tuple(kind(part) for part in text.split(",") if part.strip())
 
 
 def _print_json(data):
@@ -81,7 +87,13 @@ def build_parser():
     hasher = sub.add_parser("hash", help="device-computed sha256 of a file on the SD card")
     hasher.add_argument("path")
 
-    sub.add_parser("doctor", help="diagnose the device; exits 1 if any check fails")
+    doctor = sub.add_parser("doctor", help="diagnose the device; exits 1 if any check fails")
+    doctor.add_argument(
+        "--latency", action="store_true", help="also measure MIDI latency (writes, then restores)"
+    )
+    _add_latency_args(doctor)
+    latency = sub.add_parser("latency", help="measure MIDI CC write to readback latency and backlog")
+    _add_latency_args(latency)
 
     shell_cmd = sub.add_parser("shell", help="run a raw serial shell command")
     shell_cmd.add_argument("--timeout", type=float, help="reply deadline in seconds (default: 5)")
@@ -92,6 +104,20 @@ def build_parser():
     _add_firmware(sub)
     _add_library(sub)
     return parser
+
+
+def _add_latency_args(parser):
+    """Arguments shared by ``latency`` and ``doctor --latency``."""
+    parser.add_argument(
+        "--param", type=_numbers(int), default=(1,), help="parameters, e.g. 1 or 1,2,3 (default: 1)"
+    )
+    parser.add_argument(
+        "--rates",
+        type=_numbers(float),
+        default=DEFAULT_RATES,
+        help=f"parameter sets per second (default: {','.join(map(str, DEFAULT_RATES))})",
+    )
+    parser.add_argument("--seconds", type=float, default=2.0, help="ramp length per rate (default: 2)")
 
 
 def _add_video(sub):
@@ -194,27 +220,40 @@ def _run_shell(args):
             _print_json(shell.hash_file(args.path))
         elif args.command == "shell":
             print(shell.command(*args.words, timeout=args.timeout).payload)
-        elif args.command == "doctor":
-            return _report(diagnose(shell))
         elif args.command == "video":
             return _run_video(args, shell)
     return 0
 
 
-def _report(findings, status=None):
+def _report(findings, **extra):
     """Print a findings report as JSON on stdout and one line per finding on stderr."""
     result = report(findings)
     for finding in findings:
         print(format_finding(finding), file=sys.stderr)
-    _print_json(result if status is None else {"status": status, **result})
+    _print_json({**extra, **result})
     return int(not result["ok"])
+
+
+def _run_device(args):
+    """Handle ``doctor`` and ``latency``, which open both links when latency is measured."""
+    if args.command == "doctor" and not args.latency:
+        with open_shell(serial_number=args.serial_number) as shell:
+            return _report(diagnose(shell))
+    with Videomancer.open(serial_number=args.serial_number, channel=args.channel) as device:
+        latency = measure_latency(
+            device, params=args.param, rates=args.rates, seconds=args.seconds, report=_note
+        )
+        findings = diagnose_latency(latency)
+        if args.command == "doctor":
+            findings = diagnose(device.shell) + findings
+        return _report(findings, latency=latency.as_dict())
 
 
 def _run_video(args, shell):
     """Handle the ``video`` subcommand group."""
     if args.action == "status":
         state = shell.video_state()
-        _report(diagnose_video(state), state.raw)
+        _report(diagnose_video(state), status=state.raw)
     elif args.action == "timings":
         _print_json(shell.video_timings())
     elif args.action == "timing":
@@ -393,6 +432,8 @@ HANDLERS = {
     "trigger": _run_midi,
     "preset": _run_midi,
     "clock": _run_midi,
+    "doctor": _run_device,
+    "latency": _run_device,
 }
 
 

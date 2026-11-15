@@ -2,7 +2,7 @@
 
 import pytest
 
-from pyvmancer.video import VideoStatus, parse_timings
+from pyvmancer.video import VideoStatus, frame_period, parse_timings
 
 STATUS = {
     "input": "hdmi",
@@ -89,3 +89,27 @@ def test_output_timing_falls_back_to_the_top_level():
     status = VideoStatus.from_json({"timing": "NTSC", "output": {}})
     assert (status.output_timing, status.source_timing) == ("NTSC", None)
     assert VideoStatus.from_json({"timing": "PAL"}).output_timing == "PAL"
+
+
+@pytest.mark.parametrize(
+    "timing, period",
+    [
+        ("1080p30", 1 / 30),
+        ("720p50", 1 / 50),
+        ("1080i60", 1 / 30),
+        ("1080p29.97", 1 / 29.97),
+        ("NTSC", 1001 / 30000),
+        ("PAL", 1 / 25),
+        ("480p", 1001 / 60000),
+        ("576p", 1 / 50),
+    ],
+)
+def test_frame_period_from_timing_name(timing, period):
+    """Rates come from the name, interlaced names counting fields."""
+    assert frame_period(timing) == pytest.approx(period)
+
+
+@pytest.mark.parametrize("timing", [None, "", "custom", "1080x"])
+def test_frame_period_unknown(timing):
+    """A name carrying no rate has no frame period."""
+    assert frame_period(timing) is None

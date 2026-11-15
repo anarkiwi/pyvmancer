@@ -2,11 +2,13 @@
 
 Each check yields a :class:`Finding`. A check whose inputs the firmware did not
 report is skipped rather than failed, so key drift between releases never
-manufactures a fault. ``hdmi.connected`` is advisory and never checked.
+manufactures a fault. ``hdmi.connected`` is advisory and never checked. :func:`diagnose` only reads;
+:func:`diagnose_midi` writes parameters and restores them.
 """
 
 from typing import Iterable, NamedTuple
 
+from .latency import LatencyReport, measure_latency
 from .video import VideoStatus
 
 
@@ -128,6 +130,61 @@ def diagnose(shell) -> list[Finding]:
             )
         )
     return findings + diagnose_video(shell.video_state())
+
+
+def _timed(latency, seconds):
+    """``<ms> ms (<frames> frames)`` for a duration in seconds."""
+    if seconds is None:
+        return "no convergence"
+    return f"{seconds * 1e3:.1f} ms ({latency.frames(seconds):.2f} frames)"
+
+
+def diagnose_latency(latency: LatencyReport) -> list[Finding]:
+    """``midi.latency`` and ``midi.backlog`` over a measured report, thresholded in frame periods.
+
+    A single write may take two frames plus the readback round trip; a paced
+    ramp's sentinel may lag a single write by one frame. Unknown timing skips both.
+    """
+    frame, median = latency.frame_period, latency.single_median
+    if not frame:
+        return []
+    limit = 2 * frame + latency.readback
+    findings = [
+        _finding(
+            "midi.latency",
+            median is not None and median <= limit,
+            f"single write median {_timed(latency, median)}, max {_timed(latency, latency.single_max)}, "
+            f"readback {_timed(latency, latency.readback)}, "
+            f"limit {_timed(latency, limit)} at {latency.timing}",
+            "the device applies CC writes late; any CC-driven timing will trail its cue by the median",
+        )
+    ]
+    if median is None or not latency.rates:
+        return findings
+    kept = [r.lag is not None and r.lag <= median + frame for r in latency.rates]
+    best = max((r.rate for r, ok in zip(latency.rates, kept) if ok), default=None)
+    findings.append(
+        _finding(
+            "midi.backlog",
+            all(kept),
+            ", ".join(
+                f"{r.rate:g}/s x{len(latency.params)} sentinel {_timed(latency, r.lag)}"
+                for r in latency.rates
+            ),
+            (
+                f"CC writes back up above {best:g} sets/s; send at most {best:g} sets/s"
+                if best is not None
+                else f"CC writes back up even at {latency.rates[0].rate:g} sets/s; "
+                "send fewer sets, or fewer parameters per set"
+            ),
+        )
+    )
+    return findings
+
+
+def diagnose_midi(device, **kwargs) -> list[Finding]:
+    """Run :func:`~pyvmancer.latency.measure_latency` and diagnose it; writes, then restores, parameters."""
+    return diagnose_latency(measure_latency(device, **kwargs))
 
 
 def report(findings: Iterable[Finding]) -> dict:

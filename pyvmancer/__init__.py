@@ -23,7 +23,7 @@ from .const import (
     resolve_operator,
 )
 from .device import ProgramParameter, Videomancer, open_midi, open_shell
-from .diagnose import Finding, diagnose, diagnose_video
+from .diagnose import Finding, diagnose, diagnose_latency, diagnose_midi, diagnose_video
 from .discovery import DeviceInfo, find_device, find_devices
 from .errors import (
     DeviceNotFoundError,
@@ -46,6 +46,7 @@ from .firmware import (
     upgrade,
     version_key,
 )
+from .latency import LatencyReport, RateResult, measure_latency
 from .library import (
     LIBRARY_PRODUCT,
     LibraryEntry,
@@ -58,7 +59,7 @@ from .library import (
 from .midi import MidiController
 from .programs import MANIFEST_PATH, ProgramEntry, ProgramManifest
 from .shell import Reply, ShellClient, encode_preset, parse_line
-from .video import VideoStatus
+from .video import VideoStatus, frame_period
 
 __version__ = VERSION
 
@@ -72,6 +73,7 @@ __all__ = [
     "Finding",
     "FirmwareError",
     "LIBRARY_PRODUCT",
+    "LatencyReport",
     "LibraryEntry",
     "LogLevel",
     "MANIFEST_PATH",
@@ -90,6 +92,7 @@ __all__ = [
     "ProgramManifest",
     "ProgramParameter",
     "PresetBank",
+    "RateResult",
     "Release",
     "Reply",
     "SWEEP_STEPS",
@@ -107,16 +110,20 @@ __all__ = [
     "__version__",
     "classify_param",
     "diagnose",
+    "diagnose_latency",
+    "diagnose_midi",
     "diagnose_video",
     "download_library",
     "encode_preset",
     "find_device",
     "find_devices",
+    "frame_period",
     "inspect_uf2",
     "install",
     "install_library",
     "library_entries",
     "list_releases",
+    "measure_latency",
     "open_midi",
     "open_shell",
     "param_kind",
