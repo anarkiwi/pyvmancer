@@ -41,3 +41,15 @@ class ShellTimeoutError(ShellError):
 
     def __init__(self, command, timeout):
         super().__init__(None, f"no response within {timeout}s", command)
+
+
+class VideoTimingIgnored(VmancerError):
+    """``video timing`` acknowledged a standard the output did not take."""
+
+    def __init__(self, requested, actual):
+        self.requested = requested
+        self.actual = actual
+        super().__init__(
+            f"video timing {requested} acknowledged but output is {actual}; "
+            "check front panel SETTINGS > Vid Route Mode and SYSTEM > Pref. Timing"
+        )

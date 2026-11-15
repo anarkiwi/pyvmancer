@@ -74,3 +74,18 @@ def test_repr_shows_the_flags():
 def test_parse_timings(usage, expected):
     """The accepted standards are discovered from the firmware's own usage string."""
     assert parse_timings(usage) == expected
+
+
+def test_output_and_source_timing():
+    """The output and selected-input timings come from their own sub-statuses."""
+    status = VideoStatus.from_json(
+        {"source": "hdmi", "timing": "NTSC", "output": {"timing": "PAL"}, "hdmi": {"timing": "1080p30"}}
+    )
+    assert (status.output_timing, status.source_timing) == ("PAL", "1080p30")
+
+
+def test_output_timing_falls_back_to_the_top_level():
+    """Without sub-statuses, the top-level timing stands in and the input timing is unknown."""
+    status = VideoStatus.from_json({"timing": "NTSC", "output": {}})
+    assert (status.output_timing, status.source_timing) == ("NTSC", None)
+    assert VideoStatus.from_json({"timing": "PAL"}).output_timing == "PAL"

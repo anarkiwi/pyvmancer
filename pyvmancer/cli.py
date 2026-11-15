@@ -6,6 +6,7 @@ import os
 import sys
 
 from . import __version__, firmware, library
+from .diagnose import diagnose, diagnose_video, format_finding, report
 from .const import OPERATORS, PARAM_COUNT
 from .device import open_midi, open_shell
 from .discovery import find_devices
@@ -80,12 +81,29 @@ def build_parser():
     hasher = sub.add_parser("hash", help="device-computed sha256 of a file on the SD card")
     hasher.add_argument("path")
 
+    sub.add_parser("doctor", help="diagnose the device; exits 1 if any check fails")
+
     shell_cmd = sub.add_parser("shell", help="run a raw serial shell command")
+    shell_cmd.add_argument("--timeout", type=float, help="reply deadline in seconds (default: 5)")
     shell_cmd.add_argument("words", nargs="+")
+
+    _add_video(sub)
 
     _add_firmware(sub)
     _add_library(sub)
     return parser
+
+
+def _add_video(sub):
+    """Add the ``video`` subcommand group."""
+    group = sub.add_parser("video", help="inspect and set the video input and timing")
+    actions = group.add_subparsers(dest="action", required=True)
+    actions.add_parser("status", help="raw video status plus diagnostic findings")
+    actions.add_parser("timings", help="timing standards the firmware accepts")
+    timing = actions.add_parser("timing", help="set the output timing and confirm it took")
+    timing.add_argument("standard")
+    source = actions.add_parser("input", help="select the video input")
+    source.add_argument("source")
 
 
 def _add_library(sub):
@@ -175,7 +193,34 @@ def _run_shell(args):
         elif args.command == "hash":
             _print_json(shell.hash_file(args.path))
         elif args.command == "shell":
-            print(shell.command(*args.words).payload)
+            print(shell.command(*args.words, timeout=args.timeout).payload)
+        elif args.command == "doctor":
+            return _report(diagnose(shell))
+        elif args.command == "video":
+            return _run_video(args, shell)
+    return 0
+
+
+def _report(findings, status=None):
+    """Print a findings report as JSON on stdout and one line per finding on stderr."""
+    result = report(findings)
+    for finding in findings:
+        print(format_finding(finding), file=sys.stderr)
+    _print_json(result if status is None else {"status": status, **result})
+    return int(not result["ok"])
+
+
+def _run_video(args, shell):
+    """Handle the ``video`` subcommand group."""
+    if args.action == "status":
+        state = shell.video_state()
+        _report(diagnose_video(state), state.raw)
+    elif args.action == "timings":
+        _print_json(shell.video_timings())
+    elif args.action == "timing":
+        _print_json(shell.apply_video_timing(args.standard).raw)
+    else:
+        shell.set_video_input(args.source)
     return 0
 
 

@@ -6,7 +6,7 @@ import json
 import pytest
 
 from pyvmancer.const import PARAM_COUNT, PARAM_MAX, SHELL_MAX_LINE, PresetBank, TransportState
-from pyvmancer.errors import ShellError, ShellTimeoutError, VmancerError
+from pyvmancer.errors import ShellError, ShellTimeoutError, VideoTimingIgnored, VmancerError
 from pyvmancer.programs import MANIFEST_PATH
 from pyvmancer.shell import (
     ENUMERATE_TIMEOUT,
@@ -951,3 +951,46 @@ def test_byte_transport_is_its_own_context_manager():
     with transport as entered:
         assert entered is transport
     assert transport.closed
+
+
+def _script_output(byte_transport, output_timing, usage="NTSC|PAL|1080p30"):
+    """Script a ``video status`` whose output is driven at ``output_timing``."""
+    byte_transport.on(
+        "video status",
+        json.dumps({"source": "hdmi", "timing": output_timing, "output": {"timing": output_timing}}),
+    )
+    byte_transport.on_error("video timing", 2, f"usage: video timing <{usage}>")
+
+
+def test_apply_video_timing_confirms_the_output(shell, byte_transport):
+    """The timing is set, the device allowed to settle, and the output read back."""
+    _script_output(byte_transport, "1080p30")
+    sleeps = []
+    status = shell.apply_video_timing("1080p30", settle=0.5, sleep=sleeps.append)
+    assert status.output_timing == "1080p30"
+    assert sleeps == [0.5]
+    assert byte_transport.written[-2:] == ["video timing 1080p30", "video status"]
+
+
+def test_apply_video_timing_detects_an_ignored_ack(shell, byte_transport):
+    """An ``ok`` that leaves the output elsewhere names requested and actual timings."""
+    _script_output(byte_transport, "NTSC")
+    with pytest.raises(VideoTimingIgnored) as err:
+        shell.apply_video_timing("1080p30", sleep=lambda _: None)
+    assert (err.value.requested, err.value.actual) == ("1080p30", "NTSC")
+    assert "Vid Route Mode" in str(err.value)
+
+
+def test_apply_video_timing_rejects_an_unknown_standard(shell, byte_transport):
+    """A standard outside the firmware's accepted list is never sent."""
+    _script_output(byte_transport, "NTSC")
+    with pytest.raises(ValueError, match="accepted: NTSC, PAL, 1080p30"):
+        shell.apply_video_timing("4k120", sleep=lambda _: None)
+    assert "video timing 4k120" not in byte_transport.written
+
+
+def test_apply_video_timing_without_a_usage_list(shell, byte_transport):
+    """Firmware that names no standards is not second-guessed."""
+    _script_output(byte_transport, "PAL", usage="")
+    byte_transport.on_error("video timing", 2, "usage")
+    assert shell.apply_video_timing("PAL", sleep=lambda _: None).timing == "PAL"
