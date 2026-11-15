@@ -70,6 +70,18 @@ class VideoStatus:
             return bool(sub["locked"])
         return bool(self.locked)
 
+    @property
+    def source_timing(self):
+        """Timing the selected input's own sub-status reports, or ``None``."""
+        sub = self.raw.get(str(self.input_source))
+        return sub.get("timing") if isinstance(sub, dict) else None
+
+    @property
+    def output_timing(self):
+        """Timing the output is driven at, falling back to the top-level timing."""
+        output = self.raw.get("output")
+        return output.get("timing", self.timing) if isinstance(output, dict) else self.timing
+
     def __repr__(self):
         return (
             f"VideoStatus(timing={self.timing!r}, input={self.input_source!r}, "

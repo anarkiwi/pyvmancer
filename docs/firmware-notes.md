@@ -1,10 +1,10 @@
 # Firmware notes
 
-Observations from a Videomancer running `1.0.0-rc.37` and `1.0.0-rc.40`.
+Observations from a Videomancer running `1.0.0-rc.37`, `1.0.0-rc.40` and `1.0.1`.
 The published LZX documentation describes a `2.1.0` firmware, and the two differ
 in several places. Always treat `help` and `fs caps` as authoritative.
 
-## `settings export` resets the USB link
+## `settings export` resets the USB link (`rc.37`)
 
 Running `settings export` reliably drops the CDC connection mid-reply:
 
@@ -20,6 +20,28 @@ address is gone.
 
 The reply appears to exceed the shell's response buffer. `pyvmancer` therefore
 does not wrap `settings export`; use `settings get <key_id>` for individual keys.
+
+## `1.0.1`
+
+- **The front-panel route can hold the output timing.** With SETTINGS > Vid Route
+  Mode or SYSTEM > Pref. Timing resolving away from the selected input, the output
+  stays at that timing with `overridden: true` while the input is locked at a
+  different one, e.g. output `NTSC` under an HDMI input locked at `1080p30`.
+  `video timing 1080p30` then acknowledges `ok` and changes nothing. Setting Vid
+  Route Mode to the input in use (or Auto), Pref. Timing to the source format, and
+  power-cycling clears it. `ShellClient.apply_video_timing` reads the output back
+  and raises `VideoTimingIgnored`; `vmancer doctor` reports it as `video.genlock`.
+- **`hdmi_tx` shows whether the transmitter drives video.** `vic: 0` with
+  `de: "000000"` means no active video leaves the HDMI output, even with
+  `output.hdmi_connected: true`; this followed the source HDMI link powering down.
+  `vmancer doctor` reports it as `video.output_active`.
+- **`video timing` usage names no standards.** A bare `video timing` answers
+  `[1] video timing`, so `video_timings()` is empty and `resync` needs an explicit
+  `alternate`.
+- **`program load` can exceed the 5 s shell timeout** while still succeeding; use
+  `vmancer shell --timeout`.
+- **`settings export` and `fs read` keep the USB link up**, unlike `rc.37` below.
+  Settings keys are numeric only.
 
 ## Error codes are tagged
 

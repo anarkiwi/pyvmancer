@@ -5,6 +5,24 @@ All notable changes to this project are documented here. The format follows
 [semantic](https://semver.org/), with the 0.x caveat that the public API may
 still move between minor releases.
 
+## [0.5.0] - 2026-11-15
+
+Minor bump: device diagnostics, so troubleshooting is a command rather than a
+script. Additive only.
+
+### Added
+
+- `pyvmancer.diagnose`: `Finding(check, ok, detail, fix)`, `diagnose_video(status)`,
+  `diagnose(shell)` and `report(findings)`. Checks `firmware.version`,
+  `fpga.running`, `video.input_locked`, `video.genlock` (output held by the
+  front-panel route), `video.output_active` (HDMI transmitter idle) and
+  `video.output_connected`; checks whose inputs the firmware omits are skipped.
+- `ShellClient.apply_video_timing(timing)`: sets, settles and reads back the
+  output timing, raising `VideoTimingIgnored` when an `ok` changed nothing.
+- `VideoStatus.output_timing` and `VideoStatus.source_timing`.
+- `vmancer doctor`, `vmancer video status|timings|timing|input`, and
+  `vmancer shell --timeout`.
+
 ## [0.4.0] - 2026-10-26
 
 Minor bump: program listing and loading become author-aware. `programs()` now

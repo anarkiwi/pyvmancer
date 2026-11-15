@@ -23,7 +23,7 @@ from .const import (
     TransportState,
     resolve_operator,
 )
-from .errors import ShellError, ShellTimeoutError, VmancerError
+from .errors import ShellError, ShellTimeoutError, VideoTimingIgnored, VmancerError
 from .programs import MANIFEST_PATH, ProgramManifest
 from .video import VideoStatus, parse_timings
 
@@ -472,6 +472,24 @@ class ShellClient:
             return parse_timings(self.command("video", "timing").payload)
         except ShellError as err:
             return parse_timings(err.message)
+
+    def apply_video_timing(self, timing, settle=RESYNC_SETTLE, sleep=time.sleep):
+        """Set the output timing, wait ``settle`` seconds and confirm it took.
+
+        The firmware acknowledges ``video timing`` with ``ok`` even when the
+        front-panel route holds the output elsewhere, so the output timing is
+        read back and :class:`~pyvmancer.errors.VideoTimingIgnored` raised when
+        it differs.
+        """
+        accepted = self.video_timings()
+        if accepted and timing not in accepted:
+            raise ValueError(f"unknown video timing {timing!r}; accepted: {', '.join(accepted)}")
+        self.set_video_timing(timing)
+        sleep(settle)
+        status = self.video_state()
+        if status.output_timing != timing:
+            raise VideoTimingIgnored(timing, status.output_timing)
+        return status
 
     def resync(self, alternate=None, settle=RESYNC_SETTLE, attempts=4, sleep=time.sleep):
         """Re-initialise the output raster by bouncing the video timing.

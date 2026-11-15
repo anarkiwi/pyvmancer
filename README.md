@@ -52,6 +52,7 @@ d.program_manifest().get("combing").description
 d.file_hash("sd:/programs/lzx/combing.vmprog")
 d.video_state().source_locked      # per-input lock, not the genlock flag
 d.resync()                         # bounce the timing to re-init the output raster
+vm.diagnose(d.shell)               # [Finding(check, ok, detail, fix), ...]
 ```
 
 MIDI only, no serial link needed:
@@ -78,7 +79,13 @@ vmancer load czartroniks/Teletext   # load another author's program
 vmancer manifest                # SD program library metadata
 vmancer hash sd:/programs/x.vmprog
 vmancer resync                  # recover an output that stopped passing frames
+vmancer doctor                  # named checks with fixes; JSON on stdout, exit 1 on any failure
+vmancer video status            # raw video status plus diagnostic findings
+vmancer video timings           # timing standards the firmware accepts
+vmancer video timing 1080p30    # set the output timing and confirm it took
+vmancer video input hdmi        # select the video input
 vmancer shell modulation status # run any raw shell command
+vmancer shell --timeout 30 program load Passthru   # longer reply deadline
 ```
 
 ## Firmware upgrade
@@ -171,7 +178,7 @@ serial needs the `dialout` group or an ACL on `/dev/ttyACM*`. See
 
 ## Status
 
-Verified against a Videomancer running firmware `1.0.0-rc.37` and `1.0.0-rc.40`.
+Verified against a Videomancer running firmware `1.0.0-rc.37`, `1.0.0-rc.40` and `1.0.1`.
 Not affiliated with LZX Industries.
 
 ## License

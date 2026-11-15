@@ -23,6 +23,7 @@ from .const import (
     resolve_operator,
 )
 from .device import ProgramParameter, Videomancer, open_midi, open_shell
+from .diagnose import Finding, diagnose, diagnose_video
 from .discovery import DeviceInfo, find_device, find_devices
 from .errors import (
     DeviceNotFoundError,
@@ -31,6 +32,7 @@ from .errors import (
     ShellTimeoutError,
     TransportError,
     TransportUnavailableError,
+    VideoTimingIgnored,
     VmancerError,
 )
 from .firmware import (
@@ -67,6 +69,7 @@ __all__ = [
     "EMBEDDED_PROGRAMS",
     "FIRMWARE_PRODUCT",
     "FIRMWARE_REPO",
+    "Finding",
     "FirmwareError",
     "LIBRARY_PRODUCT",
     "LibraryEntry",
@@ -98,10 +101,13 @@ __all__ = [
     "TransportUnavailableError",
     "Uf2Image",
     "VideoStatus",
+    "VideoTimingIgnored",
     "Videomancer",
     "VmancerError",
     "__version__",
     "classify_param",
+    "diagnose",
+    "diagnose_video",
     "download_library",
     "encode_preset",
     "find_device",
