@@ -133,6 +133,8 @@ class FakeByteTransport(ByteTransport):
         self._author = None
         self._pending = bytearray()
         self.cc = FakeCcMap()
+        self.loaded = None
+        self.queued = {}
 
     def on(self, command, payload, tag=None):
         """Script an ``@tag:payload`` reply for an exact command line."""
@@ -148,6 +150,16 @@ class FakeByteTransport(ByteTransport):
         """Script arbitrary raw lines (logs, then a reply) for a command line."""
         self.scripts[command] = list(lines)
         return self
+
+    def queue(self, command, *lines):
+        """Answer the next ``len(lines)`` sends of ``command`` with one raw line each, in order."""
+        self.queued.setdefault(command, []).extend(lines)
+        return self
+
+    def fpga(self, state="running", configured=True, program=None):
+        """An ``fpga status`` reply line; ``program`` defaults to the last one loaded."""
+        status = {"state": state, "configured": configured, "program": program or self.loaded}
+        return reply_line("fpga", json.dumps(status))
 
     def silence(self, command):
         """Script no response at all for a command line."""
@@ -168,7 +180,13 @@ class FakeByteTransport(ByteTransport):
             self._author = command.split(" ")[2]
         if command == "programs list" and self._author in self.author_lists:
             self.on(command, self.author_lists[self._author])
+        if command.startswith("program load "):
+            self.loaded = command.split(" ", 2)[2]
+        if self.queued.get(command):
+            return f"{self.queued[command].pop(0)}\n".encode("ascii")
         lines = self.scripts.get(command)
+        if lines is None and command == "fpga status":
+            lines = [self.fpga()]
         payload = self.cc.handle(command) if lines is None else None
         if payload is not None:
             lines = [reply_line(command.split(" ")[0], payload)]

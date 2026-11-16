@@ -255,21 +255,22 @@ class Videomancer:
         return self.midi.trigger(param, velocity=velocity)
 
     def select_preset(self, program):
-        """Recall a preset by MIDI program change, then assign the CC map when serial is open."""
+        """Recall a preset by MIDI program change; with serial open, wait for it and assign the CC map."""
         self.midi.select_preset(program)
         if self.has_shell:
+            self.shell.wait_loaded()
             self.consume_midi_assign()
             self.assign_cc_map("preset")
         return self
 
     def apply_preset(self, index, bank=None):
-        """Apply a preset over serial, then assign the CC map."""
-        self.shell.apply_preset(index, bank)
+        """Apply a preset over serial, wait until the device runs it, then assign the CC map."""
+        self.shell.apply_preset(index, bank).wait_loaded()
         self.consume_midi_assign()
         return self.assign_cc_map("preset")
 
     def load_program(self, name, settle=1.5):
-        """Load a program by name or ``author/Name``, read its parameters, and assign the CC map."""
+        """Load a program by name or ``author/Name``; once it runs, read its parameters and assign the CC map."""
         result = self.shell.load_program(name, settle=settle)
         self.program = name
         self.consume_midi_assign()

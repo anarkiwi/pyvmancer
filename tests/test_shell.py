@@ -432,9 +432,9 @@ def test_load_qualified_program_enumerates_first(shell, byte_transport):
     """``author/Name`` enumerates that author, then loads the plain name."""
     multi_author(byte_transport, {"lzx": 0, "czartroniks": 0})
     shell.load_program("czartroniks/Teletext", settle=0)
-    assert byte_transport.written[-2:] == ["programs enumerate czartroniks", "program load Teletext"]
+    assert byte_transport.written[-4:-2] == ["programs enumerate czartroniks", "program load Teletext"]
     shell.load_program("czartroniks/Other", settle=0)
-    assert byte_transport.written[-2:] == ["program load Teletext", "program load Other"]
+    assert byte_transport.written[-3] == "program load Other"
 
 
 def test_load_plain_program_means_lzx(shell, byte_transport):
@@ -442,14 +442,14 @@ def test_load_plain_program_means_lzx(shell, byte_transport):
     multi_author(byte_transport, {"lzx": 0, "czartroniks": 0})
     shell.enumerate_author("czartroniks")
     shell.load_program("Teletext", settle=0)
-    assert byte_transport.written[-2:] == ["programs enumerate lzx", "program load Teletext"]
+    assert byte_transport.written[-4:-2] == ["programs enumerate lzx", "program load Teletext"]
 
 
 def test_load_on_legacy_firmware_loads_plain_name(shell, byte_transport):
     """Without authors the name is loaded as given, with no enumerate."""
     legacy(byte_transport)
     shell.load_program("perlin", settle=0)
-    assert byte_transport.written[-1] == "program load perlin"
+    assert byte_transport.written[-3] == "program load perlin"
     assert not any(w.startswith("programs enumerate") for w in byte_transport.written)
 
 
@@ -457,7 +457,7 @@ def test_load_program_without_settle(shell, byte_transport):
     """Loading with no settle delay still issues the command."""
     legacy(byte_transport)
     assert shell.load_program("perlin", settle=0) is shell
-    assert byte_transport.last == "program load perlin"
+    assert byte_transport.written[-3] == "program load perlin"
 
 
 def test_load_program_settles(shell, byte_transport, monkeypatch):
@@ -466,7 +466,7 @@ def test_load_program_settles(shell, byte_transport, monkeypatch):
     legacy(byte_transport)
     monkeypatch.setattr("pyvmancer.shell.time.sleep", slept.append)
     shell.load_program("moire")
-    assert byte_transport.last == "program load moire"
+    assert byte_transport.written[-3] == "program load moire"
     assert slept == [1.5]
 
 

@@ -5,6 +5,28 @@ All notable changes to this project are documented here. The format follows
 [semantic](https://semver.org/), with the 0.x caveat that the public API may
 still move between minor releases.
 
+## [0.6.2] - 2026-11-16
+
+Patch: a load waits until the device runs the program, because `program load`
+can acknowledge before the FPGA reconfiguration completes and the `program info`
+read that follows then fails with `no program loaded`.
+
+### Added
+
+- `ShellClient.wait_loaded(program=None, timeout=None)`: polls `fpga status` until
+  `program` (any when None) is `running` and `configured` and `program info`
+  answers, bounded by the shell's reply deadline; returns the last status.
+- `ProgramLoadError` (`program`, `status`), raised when a load never completes and
+  naming the last `fpga status`.
+- `shell.fpga_running(status, program=None)`.
+
+### Fixed
+
+- `ShellClient.load_program` (and so `Videomancer.load_program`) waits for the load
+  before returning, so the parameter read and CC-map assignment no longer race it.
+- `Videomancer.apply_preset` and `select_preset` wait for the device the same way
+  before assigning the CC map.
+
 ## [0.6.1] - 2026-11-16
 
 Patch: the device's MIDI CC map is checked and assigned, because a learned
