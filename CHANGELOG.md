@@ -5,6 +5,27 @@ All notable changes to this project are documented here. The format follows
 [semantic](https://semver.org/), with the 0.x caveat that the public API may
 still move between minor releases.
 
+## [0.6.0] - 2026-11-15
+
+Minor bump: a MIDI CC write to readback latency diagnostic, so whether the
+device keeps up with a CC rate is a command rather than a script. Additive only.
+
+### Added
+
+- `pyvmancer.latency.measure_latency(device, *, params, rates, seconds, samples,
+  timeout, clock, sleep, report)` returning a `LatencyReport`: readback round
+  trip, single-write latency samples, and per-rate `RateResult` sentinel lag
+  after a paced ramp. Targets are `manual + offset`; parameters with a modulation
+  source, toggles and manual values without CC headroom are refused, and every
+  touched parameter is restored to its prior combined value.
+- `diagnose_latency(report)` and `diagnose_midi(device)`: `midi.latency` (median
+  single write over two frames plus the readback round trip) and `midi.backlog`
+  (a sentinel lagging a single write by over a frame, naming the fastest rate
+  that kept up). The frame period comes from the output timing.
+- `video.frame_period(timing)` and `ShellClient.manual_values()`.
+- `vmancer latency [--param N[,N...]] [--rates R,...] [--seconds S]` and
+  `vmancer doctor --latency`; `diagnose(shell)` stays read-only.
+
 ## [0.5.0] - 2026-11-15
 
 Minor bump: device diagnostics, so troubleshooting is a command rather than a

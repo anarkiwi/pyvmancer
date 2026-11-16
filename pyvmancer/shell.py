@@ -528,6 +528,16 @@ class ShellClient:
                 return values
         raise VmancerError("device reported no 12-slot parameter state")
 
+    def manual_values(self, state=None):
+        """Stored manual values of all 12 slots from ``program state``, or a reply already read.
+
+        A MIDI CC leaves these alone; it only moves the combined output.
+        """
+        values = _slot_vector(self.program_state() if state is None else state, MANUAL_KEYS)
+        if values is None:
+            raise VmancerError("device reported no 12-slot manual values")
+        return values
+
     def fpga_status(self):
         """FPGA configuration state and loaded program."""
         return self.command("fpga", "status").json()

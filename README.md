@@ -53,6 +53,7 @@ d.file_hash("sd:/programs/lzx/combing.vmprog")
 d.video_state().source_locked      # per-input lock, not the genlock flag
 d.resync()                         # bounce the timing to re-init the output raster
 vm.diagnose(d.shell)               # [Finding(check, ok, detail, fix), ...]
+vm.diagnose_latency(vm.measure_latency(d))   # midi.latency, midi.backlog; restores what it wrote
 ```
 
 MIDI only, no serial link needed:
@@ -80,6 +81,8 @@ vmancer manifest                # SD program library metadata
 vmancer hash sd:/programs/x.vmprog
 vmancer resync                  # recover an output that stopped passing frames
 vmancer doctor                  # named checks with fixes; JSON on stdout, exit 1 on any failure
+vmancer doctor --latency        # also midi.latency and midi.backlog (writes, then restores P1)
+vmancer latency --param 1 --rates 5,10,20,40,80 --seconds 2   # CC write to readback timing
 vmancer video status            # raw video status plus diagnostic findings
 vmancer video timings           # timing standards the firmware accepts
 vmancer video timing 1080p30    # set the output timing and confirm it took

@@ -35,6 +35,13 @@ does not wrap `settings export`; use `settings get <key_id>` for individual keys
   `de: "000000"` means no active video leaves the HDMI output, even with
   `output.hdmi_connected: true`; this followed the source HDMI link powering down.
   `vmancer doctor` reports it as `video.output_active`.
+- **CC writes apply within a frame and do not back up.** At 1080p30, a serial
+  `combined_values()` round trip took about 2 ms, and a single CC write read back
+  converged in about 33 ms, one frame. Ramping one parameter at 80 sets/s, or six
+  at 40 sets/s (about 480 CC messages/s), left no backlog: the last write still
+  converged within a frame. `vmancer latency` measures this; `vmancer doctor
+  --latency` fails `midi.latency` above two frames plus the readback round trip,
+  and `midi.backlog` when a ramp's last write lags a single write by over a frame.
 - **`video timing` usage names no standards.** A bare `video timing` answers
   `[1] video timing`, so `video_timings()` is empty and `resync` needs an explicit
   `alternate`.

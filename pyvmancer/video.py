@@ -6,6 +6,7 @@ at all. Only observing the output itself proves frames are arriving.
 """
 
 import re
+from fractions import Fraction
 
 TIMING_KEYS = ("timing", "output_timing", "out_timing", "format")
 INPUT_KEYS = ("input", "source", "input_source")
@@ -13,6 +14,28 @@ LOCK_KEYS = ("locked", "lock", "input_locked", "detected")
 
 #: ``video timing`` reports the standards it accepts inside angle brackets.
 TIMING_USAGE = re.compile(r"<([^>]*)>")
+
+
+#: Frame rates of the standards whose names carry no rate; NTSC-family rates are 1000/1001 of nominal.
+NAMED_FRAME_RATES = {
+    "NTSC": Fraction(30000, 1001),
+    "PAL": Fraction(25),
+    "480i": Fraction(30000, 1001),
+    "480p": Fraction(60000, 1001),
+    "576i": Fraction(25),
+    "576p": Fraction(50),
+}
+#: ``<lines><p|i><rate>``, e.g. ``1080p30`` or ``1080i60``; an interlaced rate counts fields.
+RATED_TIMING = re.compile(r"^\d+([pi])(\d+(?:\.\d+)?)$")
+
+
+def frame_period(timing):
+    """Seconds per frame of a timing standard name, or ``None`` when the name gives no rate."""
+    rate = NAMED_FRAME_RATES.get(str(timing))
+    match = RATED_TIMING.match(str(timing))
+    if rate is None and match:
+        rate = Fraction(match.group(2)) / (2 if match.group(1) == "i" else 1)
+    return float(1 / rate) if rate else None
 
 
 def parse_timings(usage):
