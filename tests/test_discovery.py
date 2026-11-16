@@ -175,7 +175,7 @@ def test_device_info_repr():
 
 
 def test_attached_matches_the_bus_address_of_a_videomancer(sysfs):
-    """Only a Videomancer at the opened bus address counts; another device there, or a new address, does not."""
+    """Only a Videomancer at the opened address counts; another device there, or a new address, does not."""
     _make_device(sysfs)
     _make_device(sysfs, name="2-1", vid=0x1234, bus=3, address=7)
     assert discovery.attached(3, 42) is True

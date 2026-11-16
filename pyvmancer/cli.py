@@ -92,7 +92,7 @@ def build_parser():
     load.add_argument(
         "--stall",
         type=float,
-        help="opt-in: fail once nothing observable changes for this many seconds (default: wait while on USB)",
+        help="opt-in: fail once nothing observable changes for this many seconds (default: wait on USB)",
     )
 
     sub.add_parser("manifest", help="show the SD program manifest over serial")
