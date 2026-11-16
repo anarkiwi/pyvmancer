@@ -7,12 +7,14 @@ import pytest
 
 from pyvmancer.ccmap import encode_setting
 from pyvmancer.const import (
+    COMMAND_GROUPS,
     CC_MAP_SETTING_KEY,
     CC_MAP_UNASSIGNED,
     CC_MSB_MASK,
     DEFAULT_CC_MSB,
     ROUTE_HDMI_IN,
     ROUTE_SETTING_KEY,
+    ShellErrorCode,
 )
 from pyvmancer.errors import ShellError
 from pyvmancer.midi import MidiController, lsb_partner
@@ -67,7 +69,7 @@ class FakeCcMap:
         """``settings get`` payload."""
         if key == ROUTE_SETTING_KEY:
             if self.route is None:
-                raise ShellError(2, "unknown key", f"settings get {key}")
+                raise ShellError(ShellErrorCode.FILE_NOT_FOUND, "setting not found", f"settings get {key}")
             return json.dumps({"key": key, "type": "uint32", "value": self.route})
         return json.dumps({"key": key, "type": "uint32", "value": self.keys[key - CC_MAP_SETTING_KEY]})
 
@@ -134,15 +136,16 @@ class FakeMidiTransport(MidiTransport):
 
 
 class FakeByteTransport(ByteTransport):
-    """ByteTransport driven by a per-command script of reply lines.
+    """ByteTransport driven by a per-command script of reply lines, answered in order like the shell.
 
-    ``default_payload`` answers unscripted commands with ``@<first word>:<payload>``;
-    set it to ``None`` to make unscripted commands hang (for timeout tests).
+    ``default_payload`` answers unscripted commands (``None`` hangs them). A line whose first word
+    is no command group is answered ``unknown_command`` echoing it, and kept in ``barriers``.
     """
 
     def __init__(self, default_payload="ok"):
         self.default_payload = default_payload
         self.written = []
+        self.barriers = []
         self.raw = bytearray()
         self.scripts = {}
         self.closed = False
@@ -166,7 +169,7 @@ class FakeByteTransport(ByteTransport):
 
     def on_error(self, command, code, message):
         """Script a ``!code:message`` failure for an exact command line."""
-        self.scripts[command] = [error_line(code, message)]
+        self.scripts[command] = [error_line(int(code), message)]
         return self
 
     def on_lines(self, command, lines):
@@ -205,14 +208,20 @@ class FakeByteTransport(ByteTransport):
         text = bytes(data).decode("ascii")
         self.raw.extend(data)
         for line in text.split("\n")[:-1]:
-            self.written.append(line)
-            if line in self.holds:
+            (self.written if line.split(" ")[0] in COMMAND_GROUPS else self.barriers).append(line)
+            if self._held is not None:
+                self._held[1] += self._response(line)
+            elif line in self.holds:
                 self._held = [self.holds.pop(line), self._response(line)]
             else:
                 self._pending.extend(self._response(line))
 
     def _response(self, command):
         """Return the encoded reply lines for one command."""
+        if command.split(" ")[0] not in COMMAND_GROUPS:
+            return (
+                f"{error_line(int(ShellErrorCode.UNKNOWN_COMMAND), f'unknown command: {command}')}\n".encode()
+            )
         if command.startswith("programs enumerate "):
             self._author = command.split(" ")[2]
         if command == "programs list" and self._author in self.author_lists:
@@ -257,6 +266,17 @@ class FakeByteTransport(ByteTransport):
         return self.written[-1]
 
 
+@pytest.fixture(name="clocked")
+def clocked_fixture(shell, byte_transport, monkeypatch):
+    """The shell on a clock that each read advances by a second, collecting progress reports."""
+    now = [0.0]
+    shell.clock = lambda: now[0]
+    byte_transport.tick = lambda: now.__setitem__(0, now[0] + 1.0)
+    shell.report, shell.report_interval = [].append, 4.0
+    monkeypatch.setattr("pyvmancer.shell.time.sleep", lambda _s: None)
+    return shell.report.__self__
+
+
 @pytest.fixture(name="midi_transport")
 def midi_transport_fixture():
     """A fresh FakeMidiTransport."""
@@ -277,5 +297,5 @@ def byte_transport_fixture():
 
 @pytest.fixture(name="shell")
 def shell_fixture(byte_transport):
-    """A ShellClient on a FakeByteTransport with a short timeout."""
-    return ShellClient(byte_transport, timeout=0.2)
+    """A ShellClient on a FakeByteTransport."""
+    return ShellClient(byte_transport)

@@ -8,8 +8,8 @@ The command set is read from the device with :meth:`ShellClient.help`.
 import base64
 import json
 import re
+import secrets
 import time
-from collections import Counter
 
 from . import scaling
 from .const import (
@@ -32,18 +32,16 @@ from .errors import (
     InterleavedReplyError,
     ProgramListError,
     ProgramLoadError,
+    ReplyShapeError,
     ShellError,
-    ShellTimeoutError,
     VideoTimingIgnored,
     VmancerError,
 )
 from .liveness import POLL_S, REPORT_S, Watch
-from .programs import MANIFEST_PATH, ProgramManifest
+from .programs import MANIFEST_PATH, ProgramManifest, listing_problems
 from .video import VideoStatus, parse_timings
 
 OK = "ok"
-#: Firmware tags shell error codes with this bit pattern; the low half is the code.
-ERROR_TAG_MASK = 0x58000000
 #: ``fs caps`` ``read_max_bytes`` default; it bounds the base64 payload, not the bytes.
 READ_CHUNK = 256
 WRITE_CHUNK = 256
@@ -65,6 +63,10 @@ LS_PAGE = 5
 SPLICED = re.compile(rf"@(?:{'|'.join(sorted(COMMAND_GROUPS))}):|![0-9]+:")
 #: Pause between ``fpga status`` polls while a load completes; it paces serial traffic only.
 LOAD_POLL_S = 0.05
+#: First word of a sync barrier: an unknown command, whose ``unknown_command`` error echoes the line.
+BARRIER_WORD = "zz"
+#: Replies the device sends unasked, by ``(tag, payload prefix)``; never an answer to a command.
+UNSOLICITED = (("program", "invalidated:"),)
 
 
 def decoded_limit(payload_max):
@@ -112,11 +114,9 @@ def _slot_vector(payload, keys):
 
 
 def written_count(reply, expected, command):
-    """Byte count acknowledged by a write, whichever form the firmware uses.
+    """Byte count acknowledged by a write: a bare ``ok`` (early firmware) or ``{"written": n}``.
 
-    ``1.0.0-rc.37`` and ``rc.40`` answer ``fs write`` with a bare ``ok``;
-    ``rc.46`` answers with ``{"written": n}``, and ``fs put`` answers
-    ``{"put": "ok", "written": n}``. A short count is a failed write.
+    A short count is a failed write.
     """
     if reply.ok:
         return expected
@@ -132,49 +132,17 @@ def written_count(reply, expected, command):
     return int(written)
 
 
-def listing_problems(author, enumerated, names, active=None):
-    """What is wrong with ``names`` as ``author``'s listing; empty when it is consistent.
-
-    ``enumerated`` is the ``programs enumerate`` reply, whose ``author`` and ``count`` it must match;
-    ``active`` is the device's active author once listed, None when unreported. Names must be
-    unique and carry no ``/``, which would read as an author qualifier.
-    """
-    problems = []
-    answered = enumerated.get("author", author)
-    if answered != author:
-        problems.append(f"enumerate answered for {answered!r}")
-    if active is not None and active != author:
-        problems.append(f"the device's active author is {active!r}")
-    count = enumerated.get("count")
-    if isinstance(count, int) and len(names) != count:
-        problems.append(f"listed {len(names)} names against an enumerated count of {count}")
-    repeated = sorted(name for name, seen in Counter(names).items() if seen > 1)
-    if repeated:
-        problems.append(f"repeated {repeated}")
-    slashed = [name for name in names if "/" in name]
-    if slashed:
-        problems.append(f"names with a '/' {slashed}")
-    return "; ".join(problems)
+def setting_value(shell, key_id):
+    """One setting's value, text or number, from ``shell.get_setting``'s ``settings get`` reply."""
+    return Reply("settings", shell.get_setting(key_id)).shaped("value")["value"]
 
 
 def read_setting(shell, key_id):
     """One setting's integer value, from ``shell.get_setting``'s ``settings get`` reply."""
-    payload = shell.get_setting(key_id)
-    try:
-        reply = json.loads(payload)
-    except json.JSONDecodeError as err:
-        raise VmancerError(f"settings key {key_id} reply {payload!r} is not JSON") from err
-    value = reply.get("value") if isinstance(reply, dict) else reply
+    value = setting_value(shell, key_id)
     if not isinstance(value, int) or isinstance(value, bool):
-        raise VmancerError(f"settings key {key_id} reply {reply!r} carries no integer value")
+        raise VmancerError(f"settings key {key_id} value {value!r} is not an integer")
     return value
-
-
-def decode_error_code(code):
-    """Strip the firmware's ``0x58000000`` tag from an error code."""
-    if code is None:
-        return None
-    return code & 0xFFFF if code & ERROR_TAG_MASK == ERROR_TAG_MASK else code
 
 
 class Reply:
@@ -191,12 +159,31 @@ class Reply:
         """True when the payload is the bare ``ok`` acknowledgement."""
         return self.payload == OK
 
+    @property
+    def unsolicited(self):
+        """True for a line the device sends unasked, such as ``@program:invalidated:...``."""
+        return any(self.tag == tag and self.payload.startswith(prefix) for tag, prefix in UNSOLICITED)
+
     def json(self):
         """Decode the payload as JSON."""
         try:
             return json.loads(self.payload)
         except json.JSONDecodeError as err:
             raise VmancerError(f"reply {self.tag!r} is not JSON: {self.payload!r}") from err
+
+    def shaped(self, *keys, **kinds):
+        """The payload as a JSON object carrying every one of ``keys``, and ``kinds`` of their types.
+
+        Raises :class:`~pyvmancer.errors.ReplyShapeError` otherwise, rather than reading a default.
+        """
+        data = self.json()
+        if not isinstance(data, dict):
+            raise ReplyShapeError(self.tag, self.payload, [*keys, *kinds])
+        wrong = [key for key in keys if key not in data]
+        wrong += [key for key, kind in kinds.items() if not isinstance(data.get(key), kind)]
+        if wrong:
+            raise ReplyShapeError(self.tag, self.payload, wrong)
+        return data
 
     def __repr__(self):
         return f"Reply(tag={self.tag!r}, payload={self.payload!r})"
@@ -211,7 +198,7 @@ def parse_line(line):
     if text.startswith("!"):
         code, _, message = text[1:].partition(":")
         try:
-            code = decode_error_code(int(code))
+            code = int(code)
         except ValueError:
             message = text[1:]
             code = None
@@ -248,28 +235,23 @@ def _check_index(index):
 class ShellClient:
     """Typed client for the Videomancer serial command set.
 
-    The device shell is single-threaded and expects one connected terminal, so
-    calls are strictly request/response.
-
-    ``timeout`` bounds the reply to an ordinary command. Commands that keep the
-    shell busy with device-side work (loads, author enumeration, hashing,
-    ``fs put``, settings import and export) are instead awaited for as long as
-    the device stays on USB; see :mod:`pyvmancer.liveness`. ``report`` receives
-    their progress lines every ``report_interval`` seconds, and ``stall``, off
-    when None, is the opt-in guard that fails one once nothing observable has
-    changed for that many seconds.
+    The shell is single-threaded and serves one terminal, so no command is sent while another is
+    outstanding and every reply is awaited on liveness (:mod:`pyvmancer.liveness`), never a deadline.
+    An abandoned wait leaves the client unsynchronised; the next command first runs a sync barrier.
     """
 
-    def __init__(self, transport, timeout=5.0, report=None, stall=None, report_interval=REPORT_S):
+    def __init__(self, transport, report=None, stall=None, report_interval=REPORT_S):
         self._transport = transport
-        self.timeout = timeout
         self.report = report
         self.stall = stall
         self.report_interval = report_interval
         self.clock = time.monotonic
         self._buffer = bytearray()
+        self.synced = False
         self.log_lines = []
         self.foreign_lines = []
+        self.discarded = []
+        self.unsolicited = []
         self._enumerated = {}
 
     @property
@@ -288,61 +270,105 @@ class ShellClient:
             clock=self.clock,
         )
 
-    def command(self, *parts, timeout=None, watch=None):
-        """Send a command and return its :class:`Reply`.
+    def command(self, *parts, watch=None):
+        """Send a command and return its :class:`Reply`, awaited on ``watch`` (a fresh one when None).
 
-        With a ``watch`` the reply has no deadline: it is awaited while the
-        device stays on USB, and nothing else is sent meanwhile.
+        An unsynchronised client runs :meth:`sync` first, so the reply read is this command's.
         """
         command = " ".join(_arg(p) for p in parts if p is not None and p != "")
         if len(command) > SHELL_MAX_LINE:
             raise ValueError(f"command exceeds {SHELL_MAX_LINE} bytes: {len(command)}")
-        self._buffer.clear()
+        watch = watch or self.watch(f"awaiting {command!r}")
+        if not self.synced:
+            self.sync(watch)
+        self.synced = False
         self._transport.write(command.encode("ascii", "strict") + b"\n")
-        return self._await_reply(command, self.timeout if timeout is None else timeout, watch)
+        return self._answer(command, watch)
 
-    def _await_reply(self, command, timeout, watch=None):
-        """Read lines until a reply or error arrives, collecting log output.
+    def replies(self, *parts, watch=None):
+        """Every reply line of a command that answers with several, such as ``cpu``'s one per core.
 
-        Lines are taken one at a time rather than drained in a batch, so
-        whatever follows a reply in the same read stays buffered for the next
-        call instead of being dropped with the batch. Without a ``watch`` the
-        wait ends at ``timeout``; with one, each read that brings nothing is a
-        busy shell, and only the watch ends the wait.
-
-        A reply tagged with another group's word is another client's, kept in ``foreign_lines``;
-        a line with a reply spliced into it raises :class:`~pyvmancer.errors.InterleavedReplyError`.
+        Once the first arrives the shell has run the command, so a barrier then collects the rest.
         """
-        deadline = self.clock() + timeout
-        group = command.split(" ", 1)[0]
-        quiet = False
+        watch = watch or self.watch(f"awaiting {' '.join(map(str, parts))!r}")
+        first = self.command(*parts, watch=watch)
+        self.synced = False
+        rest = self._barrier(watch, first.tag)
+        self.synced = True
+        return [first, *rest]
+
+    def sync(self, watch=None):
+        """Send a sync barrier and discard everything the device sent before its echo.
+
+        The barrier is an unknown command carrying a fresh nonce; the shell answers in order,
+        so any reply still owed to an abandoned command arrives before the echo and is dropped.
+        """
+        self._barrier(watch or self.watch("synchronising"))
+        self.synced = True
+        return self
+
+    def _barrier(self, watch, tag=None):
+        """Write a barrier and read to its echo, returning the replies tagged ``tag`` on the way."""
+        barrier = f"{BARRIER_WORD}{secrets.token_hex(8)}"
+        self._transport.write(f"{barrier}\n".encode("ascii"))
+        collected = []
         while True:
-            line = self._pop_line()
-            while line is not None:
-                kind, value = parse_line(line)
-                if SPLICED.search(line, 1):
-                    raise InterleavedReplyError(command, line)
-                if kind == "reply" and value.tag != group and value.tag in COMMAND_GROUPS:
-                    self.foreign_lines.append(line)
-                elif kind == "reply":
-                    return value
-                elif kind == "error":
-                    raise ShellError(value.code, value.message, command)
-                elif value:
-                    self.log_lines.append(value)
-                line = self._pop_line()
-            if watch is not None:
-                if quiet:
-                    watch.observe(f"shell busy on {command!r}", (len(self.log_lines), len(self._buffer)))
-                remaining = POLL_S
+            line = self._line(watch, f"awaiting sync {barrier}")
+            kind, value = parse_line(line)
+            if kind == "error" and barrier in value.message:
+                return collected
+            if kind == "reply" and tag is not None and value.tag == tag and not value.unsolicited:
+                collected.append(value)
             else:
-                remaining = deadline - self.clock()
-                if remaining <= 0:
-                    raise ShellTimeoutError(command, timeout)
-            chunk = self._transport.read(timeout=min(POLL_S, remaining))
-            quiet = not chunk
+                self.discarded.append(line)
+
+    def _answer(self, command, watch):
+        """Await ``command``'s reply, marking the client synchronised once it is in.
+
+        An error reply completes the exchange too, and is raised as :class:`ShellError`.
+        """
+        answer = self._await_reply(command, watch)
+        self.synced = True
+        if isinstance(answer, ShellError):
+            raise ShellError(answer.code, answer.message, command)
+        return answer
+
+    def _line(self, watch, label):
+        """The next complete line, read for as long as ``watch`` allows."""
+        line = self._pop_line()
+        while line is None:
+            chunk = self._transport.read(timeout=POLL_S)
             if chunk:
                 self._buffer.extend(chunk)
+            else:
+                watch.observe(label, (len(self.log_lines), len(self._buffer)))
+            line = self._pop_line()
+        return line
+
+    def _await_reply(self, command, watch):
+        """Read lines until ``command``'s reply or error, collecting log output.
+
+        A reply tagged with another group's word is kept in ``foreign_lines``, an unsolicited
+        one in ``unsolicited``; a line with a reply spliced into it raises
+        :class:`~pyvmancer.errors.InterleavedReplyError`.
+        """
+        group = command.split(" ", 1)[0]
+        label = f"shell busy on {command!r}"
+        while True:
+            line = self._line(watch, label)
+            if SPLICED.search(line, 1):
+                raise InterleavedReplyError(command, line)
+            kind, value = parse_line(line)
+            if kind == "error":
+                return value
+            if kind == "reply" and value.unsolicited:
+                self.unsolicited.append(line)
+            elif kind == "reply" and value.tag != group and value.tag in COMMAND_GROUPS:
+                self.foreign_lines.append(line)
+            elif kind == "reply":
+                return value
+            elif value:
+                self.log_lines.append(value)
 
     def _pop_line(self):
         """Pop one complete newline-delimited line, or ``None`` when none is buffered."""
@@ -392,8 +418,11 @@ class ShellClient:
         return self.command("ram").json()
 
     def cpu(self):
-        """Per-core CPU usage."""
-        return self.command("cpu").json()
+        """Per-core CPU usage, ``{"core0": {...}, "core1": {...}}``, merged from one line per core."""
+        cores = {}
+        for reply in self.replies("cpu"):
+            cores.update(reply.shaped())
+        return cores
 
     def log_level(self, level):
         """Set diagnostic log verbosity; the device echoes the level it applied."""
@@ -408,19 +437,22 @@ class ShellClient:
 
     def reboot_bootloader(self):
         """Reboot into firmware update mode; the link drops, so no reply is awaited."""
+        if not self.synced:
+            self.sync()
+        self.synced = False
         self._transport.write(b"reboot bootloader\n")
         return self
 
     def authors(self):
         """Program authors the firmware can enumerate (``programs authors``)."""
-        return list(self.command("programs", "authors").json().get("authors", []))
+        return list(self.command("programs", "authors").shaped(authors=list)["authors"])
 
     def active_author(self, watch=None):
         """The device's own active author, ``fpga status`` ``browse_author``; None when it does not say.
 
         Another client can change it, so it is read from the device rather than remembered.
         """
-        return self.command("fpga", "status", watch=watch).json().get("browse_author")
+        return self.command("fpga", "status", watch=watch).shaped("state").get("browse_author")
 
     def enumerate_author(self, author, watch=None, force=False):
         """Make ``author`` the active author, returning the device's enumerate reply.
@@ -432,7 +464,8 @@ class ShellClient:
         watch = watch or self.watch(f"enumerating {author}")
         if force or author not in self._enumerated or self.active_author(watch) != author:
             self._enumerated.pop(author, None)
-            self._enumerated[author] = self.command("programs", "enumerate", author, watch=watch).json()
+            reply = self.command("programs", "enumerate", author, watch=watch)
+            self._enumerated[author] = reply.shaped("author", count=int)
         return self._enumerated[author]
 
     def _active_programs(self):
@@ -440,8 +473,8 @@ class ShellClient:
         names = []
         offset = 0
         while True:
-            page = self.command("programs", "list", offset or None).json()
-            names.extend(page.get("programs", []))
+            page = self.command("programs", "list", offset or None).shaped(programs=list)
+            names.extend(page["programs"])
             nxt = page.get("next")
             if not page.get("more") or nxt is None or nxt <= offset:
                 return names
@@ -450,13 +483,13 @@ class ShellClient:
     def _authors_or_none(self):
         """Authors, or None on firmware that answers ``programs authors`` as a command it lacks.
 
-        Any other failure, a timeout, a busy shell or a garbled reply, raises:
-        listing only the active author would pass for the whole library.
+        Any other failure or a reply of the wrong shape raises: listing only the active author
+        would pass for the whole library.
         """
         try:
             return self.authors()
         except ShellError as err:
-            if isinstance(err, ShellTimeoutError) or err.code not in ABSENT_COMMAND_CODES:
+            if err.code not in ABSENT_COMMAND_CODES:
                 raise
             return None
 
@@ -497,11 +530,9 @@ class ShellClient:
     def load_program(self, name, settle=1.5):
         """Load an FPGA program, wait until the device runs it, then settle.
 
-        ``name`` is ``Name`` for the ``lzx`` author or ``author/Name``; the author
-        is enumerated first unless already active. The shell gives no reply
-        while it reads the program from the card, and ``program load`` can
-        answer before the reconfiguration completes, so both the reply and
-        :meth:`wait_loaded` are awaited on liveness rather than a deadline.
+        ``name`` is ``Name`` for the ``lzx`` author or ``author/Name``; the author is enumerated
+        first unless already active. ``program load`` can answer before the FPGA reconfigures,
+        so :meth:`wait_loaded` follows it.
         """
         author, slash, plain = name.partition("/")
         if not slash:
@@ -518,18 +549,14 @@ class ShellClient:
     def wait_loaded(self, program=None, watch=None, sleep=None):
         """Poll ``fpga status`` until ``program`` (any when None) runs and ``program info`` answers.
 
-        The FPGA may keep running the previous program, or sit idle with no
-        program, while it configures; ``program info`` answering "no program
-        loaded" means the same. None of that is a fault, so the wait runs on
-        ``watch`` (a fresh one when None). It fails with
-        :class:`~pyvmancer.errors.ProgramLoadError` only on positive evidence:
-        once ``fpga status`` has moved off the state first seen, it settles on
-        a different program running. Returns the final status.
+        A previous program running, an idle FPGA or "no program loaded" while it configures is no
+        fault. :class:`~pyvmancer.errors.ProgramLoadError` needs positive evidence: once the status
+        has moved off the first one seen, another program running. Returns the final status.
         """
         watch = watch or self.watch(f"loading {program or 'program'}")
         first, moved = None, False
         while True:
-            status = self.command("fpga", "status", watch=watch).json()
+            status = self.command("fpga", "status", watch=watch).shaped("state")
             key = fpga_key(status)
             first = key if first is None else first
             moved = moved or key != first
@@ -713,7 +740,7 @@ class ShellClient:
 
     def fpga_status(self):
         """FPGA configuration state and loaded program."""
-        return self.command("fpga", "status").json()
+        return self.command("fpga", "status").shaped("state")
 
     def fpga_register(self, addr, value):
         """Write a raw FPGA register."""
@@ -891,21 +918,11 @@ class ShellClient:
             return PUT_MAX_BYTES
 
     def put_file(self, path, data, chunk=PUT_CHUNK):
-        """Upload a whole file with ``fs put``, the raw streaming path.
+        """Upload a whole file with ``fs put``, the raw streaming path (docs/firmware-notes.md).
 
-        ``fs put <path> <size>`` answers ``{"put": "ready"}`` and the device then
-        takes exactly ``size`` bytes off the link as the payload, with no
-        encoding and no per-chunk commands. Measured at about 157 kB/s against
-        roughly 3 kB/s for the base64 ``fs write`` path, which is the difference
-        between minutes and days for a program library.
-
-        Once the handshake is answered the payload owns the link until its last
-        byte: the device takes anything else sent as file content, and a client
-        that abandons the transfer strands it consuming commands as payload,
-        recoverable only by feeding the promised byte count or power cycling.
-        Abandoning it is therefore what has to be avoided. The device stalls
-        while it commits to the card, so the handshake, the payload and the
-        final reply are all awaited on liveness rather than a deadline.
+        After ``{"put": "ready"}`` the device takes exactly ``size`` raw bytes as the payload and
+        anything else sent meanwhile as file content, so the handshake, payload and commit are
+        all awaited on liveness: abandoning a put strands the device.
         """
         target = _check_path(path)
         payload = bytes(data)
@@ -916,10 +933,10 @@ class ShellClient:
         state = self.command("fs", "put", target, len(payload), watch=watch).json()
         if state.get("put") != "ready":
             raise VmancerError(f"fs put {target}: device did not report ready: {state!r}")
+        self.synced = False
         for offset in range(0, len(payload), chunk):
             self._transport.write(payload[offset : offset + chunk])
-        reply = self._await_reply(f"fs put {target}", self.timeout, watch)
-        written_count(reply, len(payload), f"fs put {target}")
+        written_count(self._answer(f"fs put {target}", watch), len(payload), f"fs put {target}")
         return self
 
     def listdir(self, path=SHELL_PATH_PREFIX):

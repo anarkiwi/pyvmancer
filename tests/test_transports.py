@@ -7,6 +7,7 @@ attributes are expected.
 
 # pylint: disable=unused-argument,no-member
 
+import errno as errnos
 import os
 import sys
 import types
@@ -14,7 +15,13 @@ import types
 import pytest
 
 from pyvmancer.discovery import DeviceInfo
-from pyvmancer.errors import DeviceGoneError, DeviceNotFoundError, TransportError, TransportUnavailableError
+from pyvmancer.errors import (
+    DeviceGoneError,
+    DeviceNotFoundError,
+    PortBusyError,
+    TransportError,
+    TransportUnavailableError,
+)
 from pyvmancer.transports import rawmidi, serial_tty, usb_cdc
 from pyvmancer.transports.mido_port import MidoTransport
 from pyvmancer.transports.rawmidi import RawMidiTransport
@@ -171,10 +178,12 @@ def test_rawmidi_context_manager(fifo):
 class _FakeSerialPort:
     """Minimal pyserial ``Serial`` stand-in: reads from a buffer, writes into a non-blocking pipe."""
 
-    def __init__(self, port, baudrate=115200, timeout=0):
+    def __init__(self, port, baudrate=115200, timeout=0, exclusive=None):
         self.port = port
         self.baudrate = baudrate
         self.timeout = timeout
+        self.exclusive = exclusive
+        self.drained = 0
         self.sink, self.fd = os.pipe()
         os.set_blocking(self.fd, False)
         self.buffer = bytearray()
@@ -206,6 +215,11 @@ class _FakeSerialPort:
                 os.write(self.fd, bytes(1 << 12))
         except BlockingIOError:
             pass
+
+    def reset_input_buffer(self):
+        """Drop whatever input is queued."""
+        self.drained += len(self.buffer)
+        self.buffer.clear()
 
     @property
     def in_waiting(self):
@@ -257,6 +271,55 @@ def test_serial_transport_write_and_read(serial_port):
     port.buffer.extend(b"@version:1.0\n")
     assert transport.read(timeout=0.1) == b"@version:1.0\n"
     assert port.timeout == pytest.approx(0.1)
+
+
+def test_serial_transport_opens_exclusively_and_drains_stale_input(monkeypatch):
+    """The port is opened exclusive, and input queued before the open is dropped."""
+
+    class Stale(_FakeSerialPort):
+        """A port with a stale reply waiting."""
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.buffer.extend(b"@programs:{}\n")
+
+    made = []
+    monkeypatch.setitem(
+        sys.modules, "serial", _serial_module(lambda *a, **k: made.append(Stale(*a, **k)) or made[-1])
+    )
+    transport = SerialTransport("/dev/ttyFAKE")
+    assert made[0].exclusive is True and made[0].drained == len(b"@programs:{}\n")
+    assert transport.read() == b""
+
+
+@pytest.mark.parametrize("code", [errnos.EAGAIN, errnos.EBUSY])
+def test_serial_transport_names_a_held_port(monkeypatch, code):
+    """A port another process holds raises PortBusyError naming the one-connection rule."""
+
+    def held(*_args, **_kwargs):
+        """pyserial's lock or open failure carries the errno."""
+        raise OSError(code, "Resource temporarily unavailable")
+
+    monkeypatch.setitem(sys.modules, "serial", _serial_module(held))
+    with pytest.raises(PortBusyError, match="one connection at a time") as excinfo:
+        SerialTransport("/dev/ttyFAKE")
+    assert isinstance(excinfo.value, TransportUnavailableError) and excinfo.value.port == "/dev/ttyFAKE"
+
+
+def test_serial_transport_refuses_a_second_open_of_a_real_tty():
+    """With real pyserial on a pty, a second open of a held tty fails, and succeeds once it is closed."""
+    pytest.importorskip("serial")
+    controller, worker = os.openpty()
+    path = os.ttyname(worker)
+    try:
+        first = SerialTransport(path)
+        with pytest.raises(PortBusyError):
+            SerialTransport(path)
+        first.close()
+        SerialTransport(path).close()
+    finally:
+        os.close(controller)
+        os.close(worker)
 
 
 def test_serial_transport_write_waits_while_the_device_is_attached(serial_port, monkeypatch):

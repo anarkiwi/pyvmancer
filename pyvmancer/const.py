@@ -7,7 +7,7 @@ serial command guide. See ``docs/protocol.md`` for provenance of each table.
 from enum import Enum, IntEnum
 
 #: Package version. Lives here so leaf modules can read it without importing the package.
-VERSION = "0.6.4"
+VERSION = "0.6.5"
 
 USB_VID = 0x16D0
 USB_PID = 0x14DB
@@ -33,19 +33,151 @@ CC_MAX = 127
 #: Controllers the MIDI spec leaves undefined below the channel-mode range (120..127), preferred first.
 #: One is sent after a load so an armed MIDI Assign captures it instead of a CC that drives a slot.
 ASSIGN_SINK_CCS = tuple(range(119, 101, -1))
-#: Settings key holding P1's CC assignment; P2..P12 follow consecutively.
+
+
+class SettingKey(IntEnum):
+    """Numeric ``settings get``/``set`` keys from the serial port guide's Setting Keys table."""
+
+    VIDEO_ROUTE_MODE = 1
+    ANALOG_INPUT_MODE = 2
+    ANALOG_OUTPUT_MODE = 3
+    MIDI_CHANNEL = 4
+    DEVELOPER_MODE = 5
+    LANGUAGE = 6
+    CURRENT_PROGRAM = 7
+    PREFERRED_TIMING = 8
+    BOOT_COUNT = 9
+    SELECTED_SLOT = 10
+    TRANSPORT_BPM = 11
+    HDMI_OUTPUT_MODE = 12
+    SOFT_PICKUP = 13
+    MIDI_OUTPUT_MODE = 14
+    ENC_TEST_PATT = 15
+    ENC_ED_HD_LVL = 16
+    H_PHASE_OUT = 17
+    H_PHASE_IN = 18
+    PROGRAM_AUTHOR = 19
+
+
+#: Panel names of the named settings keys, as the guide gives them.
+SETTING_NAMES = {
+    SettingKey.VIDEO_ROUTE_MODE: "Video Route Mode",
+    SettingKey.ANALOG_INPUT_MODE: "Analog Input Mode",
+    SettingKey.ANALOG_OUTPUT_MODE: "Analog Output Mode",
+    SettingKey.MIDI_CHANNEL: "MIDI Channel",
+    SettingKey.DEVELOPER_MODE: "Developer Mode",
+    SettingKey.LANGUAGE: "Language",
+    SettingKey.CURRENT_PROGRAM: "current program",
+    SettingKey.PREFERRED_TIMING: "Preferred Timing",
+    SettingKey.BOOT_COUNT: "boot count",
+    SettingKey.SELECTED_SLOT: "selected slot",
+    SettingKey.TRANSPORT_BPM: "transport BPM x100",
+    SettingKey.HDMI_OUTPUT_MODE: "HDMI Output Mode",
+    SettingKey.SOFT_PICKUP: "Soft Pickup",
+    SettingKey.MIDI_OUTPUT_MODE: "MIDI Output Mode",
+    SettingKey.ENC_TEST_PATT: "Enc Test Patt",
+    SettingKey.ENC_ED_HD_LVL: "Enc ED/HD Lvl",
+    SettingKey.H_PHASE_OUT: "H Phase Out",
+    SettingKey.H_PHASE_IN: "H Phase In",
+    SettingKey.PROGRAM_AUTHOR: "program author",
+}
+#: Vid Route Mode values by panel name.
+ROUTE_MODES = dict(enumerate(("Analog In", "HDMI In", "Dual In", "Standalone", "Auto")))
+#: Preferred Timing codes: the FPGA's 4-bit timing value, not a list position.
+TIMING_CODES = dict(
+    enumerate(
+        (
+            "NTSC",
+            "1080i50",
+            "1080i5994",
+            "1080p24",
+            "480p",
+            "720p50",
+            "720p5994",
+            "1080p30",
+            "PAL",
+            "1080p2398",
+            "1080i60",
+            "1080p25",
+            "576p",
+            "1080p2997",
+            "720p60",
+        )
+    )
+)
+_DISABLED_ENABLED = ("Disabled", "Enabled")
+#: Value names of the enumerated settings keys.
+SETTING_VALUES = {
+    SettingKey.VIDEO_ROUTE_MODE: ROUTE_MODES,
+    SettingKey.ANALOG_INPUT_MODE: dict(
+        enumerate(("Composite", "S-Video", "YPbPr", "RGB SOG", "RGB 1V", "YPbPr 1V", "YYY 1V", "Auto"))
+    ),
+    SettingKey.ANALOG_OUTPUT_MODE: dict(enumerate(("CVBS/S-Video", "YPbPr", "RGsB", "YYY", "SOG"))),
+    SettingKey.MIDI_CHANNEL: {0: "Disabled", 1: "Omni", **{n + 1: f"channel {n}" for n in range(1, 17)}},
+    SettingKey.DEVELOPER_MODE: dict(enumerate(_DISABLED_ENABLED)),
+    SettingKey.PREFERRED_TIMING: TIMING_CODES,
+    SettingKey.HDMI_OUTPUT_MODE: dict(enumerate(("HDMI", "DVI"))),
+    SettingKey.SOFT_PICKUP: dict(enumerate(_DISABLED_ENABLED)),
+    SettingKey.MIDI_OUTPUT_MODE: dict(enumerate(("Disabled", "Manual+Mod", "Manual Only", "Mod Only"))),
+    SettingKey.ENC_TEST_PATT: dict(enumerate(("Off", "On"))),
+    SettingKey.ENC_ED_HD_LVL: dict(enumerate(("Studio", "Full"))),
+}
+#: Settings key of channel 0's saved modulator state: ``MODULATOR_SETTING_KEY + channel * 5 + field``.
+MODULATOR_SETTING_KEY = 100
+#: Saved modulator fields, in key order within a channel.
+MODULATOR_FIELDS = ("manual", "time", "space", "slope", "source")
+#: Settings key holding P1's MIDI Assign; P2..P12 follow consecutively.
 CC_MAP_SETTING_KEY = 200
-#: A CC-map setting is ``CC_MAP_ASSIGNED | msb``, or ``CC_MAP_UNASSIGNED``, as observed on 1.0.1.
-CC_MAP_ASSIGNED = 0x1FF00
-CC_MAP_UNASSIGNED = 0x1FFFF
-#: Bits of a CC-map setting holding the MSB.
+#: MIDI Assign packing: bits 0-7 the CC, bits 8-15 the LSB CC, bit 16 auto-pair.
 CC_MSB_MASK = 0xFF
-#: Settings key holding front panel SETTINGS > Vid Route Mode, as observed on 1.0.1.
-ROUTE_SETTING_KEY = 1
-#: Vid Route Mode values observed on 1.0.1, by panel name; no other mode's value is confirmed.
-ROUTE_MODES = {1: "HDMI In", 4: "Auto"}
+CC_LSB_SHIFT = 8
+CC_AUTO_PAIR = 1 << 16
+#: A packed CC byte meaning none.
+CC_NONE = 0xFF
+#: A CC-map setting is ``CC_MAP_ASSIGNED | msb``, or ``CC_MAP_UNASSIGNED``, as written by 1.0.1.
+CC_MAP_ASSIGNED = CC_AUTO_PAIR | CC_NONE << CC_LSB_SHIFT
+CC_MAP_UNASSIGNED = CC_MAP_ASSIGNED | CC_NONE
+#: Settings key holding front panel SETTINGS > Vid Route Mode.
+ROUTE_SETTING_KEY = SettingKey.VIDEO_ROUTE_MODE
 #: The route a rig fed only over HDMI runs under.
 ROUTE_HDMI_IN = 1
+
+
+def modulator_key(channel, field):
+    """Settings key of one saved modulator field, ``field`` a name of :data:`MODULATOR_FIELDS`."""
+    return MODULATOR_SETTING_KEY + int(channel) * len(MODULATOR_FIELDS) + MODULATOR_FIELDS.index(field)
+
+
+def setting_name(key):
+    """Name of a settings key: its panel name, ``P3 time``, ``MIDI Assign P5``, or ``key N``."""
+    key = int(key)
+    modulator, field = divmod(key - MODULATOR_SETTING_KEY, len(MODULATOR_FIELDS))
+    if key in SETTING_NAMES:
+        return SETTING_NAMES[key]
+    if 0 <= modulator < PARAM_COUNT:
+        return f"P{modulator + 1} {MODULATOR_FIELDS[field]}"
+    if 0 <= key - CC_MAP_SETTING_KEY < PARAM_COUNT:
+        return f"MIDI Assign P{key - CC_MAP_SETTING_KEY + 1}"
+    return f"key {key}"
+
+
+def describe_midi_assign(value):
+    """A packed MIDI Assign value as ``CC n``, ``LSB m`` and ``auto``, or ``none``."""
+    msb, lsb = value & CC_MSB_MASK, value >> CC_LSB_SHIFT & CC_MSB_MASK
+    if msb == CC_NONE:
+        return "none"
+    parts = [f"CC {msb}"] + ([] if lsb == CC_NONE else [f"LSB {lsb}"])
+    return " ".join(parts + (["auto"] if value & CC_AUTO_PAIR else []))
+
+
+def describe_setting(key, value):
+    """``value`` with the guide's name for it, e.g. ``1 (HDMI In)``; other values are shown bare."""
+    key = int(key)
+    name = SETTING_VALUES.get(key, {}).get(value) if isinstance(value, int) else None
+    if name is None and isinstance(value, int) and 0 <= key - CC_MAP_SETTING_KEY < PARAM_COUNT:
+        name = describe_midi_assign(value)
+    return f"{value!r}" if name is None else f"{value} ({name})"
+
 
 #: MIDI notes 0..11 trigger modulators P1..P12.
 NOTE_BASE = 0
@@ -299,22 +431,53 @@ class LogLevel(Enum):
     INFO = "info"
     WARN = "warn"
     ERROR = "error"
+    CRITICAL = "critical"
     NONE = "none"
 
 
-class ShellErrorCode(IntEnum):
-    """Numeric error codes returned as ``!<code>:<message>``."""
+#: An error code is ``domain << ERROR_DOMAIN_SHIFT | item``.
+ERROR_DOMAIN_SHIFT = 26
+ERROR_ITEM_MASK = 0x3FFF
 
-    UNKNOWN_COMMAND = 1
-    PARSE_ERROR = 2
-    SERVICE_UNAVAILABLE = 3
-    BUFFER_OVERFLOW = 4
-    NOT_CONNECTED = 5
-    FILE_NOT_FOUND = 6
-    IO_ERROR = 7
-    SD_NOT_MOUNTED = 8
-    PATH_TOO_LONG = 9
-    INVALID_PATH = 10
+
+class ErrorDomain(IntEnum):
+    """Firmware domain raising an error: the top 6 bits of its code."""
+
+    SHELL = 22
+    PRESETS = 23
+
+
+class ShellErrorCode(IntEnum):
+    """Shell (domain 22) error codes returned as ``!<code>:<message>``."""
+
+    UNKNOWN_COMMAND = ErrorDomain.SHELL << ERROR_DOMAIN_SHIFT | 1
+    PARSE_ERROR = ErrorDomain.SHELL << ERROR_DOMAIN_SHIFT | 2
+    SERVICE_UNAVAILABLE = ErrorDomain.SHELL << ERROR_DOMAIN_SHIFT | 3
+    BUFFER_OVERFLOW = ErrorDomain.SHELL << ERROR_DOMAIN_SHIFT | 4
+    NOT_CONNECTED = ErrorDomain.SHELL << ERROR_DOMAIN_SHIFT | 5
+    FILE_NOT_FOUND = ErrorDomain.SHELL << ERROR_DOMAIN_SHIFT | 6
+    IO_ERROR = ErrorDomain.SHELL << ERROR_DOMAIN_SHIFT | 7
+    SD_NOT_MOUNTED = ErrorDomain.SHELL << ERROR_DOMAIN_SHIFT | 8
+    PATH_TOO_LONG = ErrorDomain.SHELL << ERROR_DOMAIN_SHIFT | 9
+    INVALID_PATH = ErrorDomain.SHELL << ERROR_DOMAIN_SHIFT | 10
+    INVALID_STATE = ErrorDomain.SHELL << ERROR_DOMAIN_SHIFT | 11
+
+
+class PresetErrorCode(IntEnum):
+    """Preset (domain 23) error codes."""
+
+    NO_PROGRAM = ErrorDomain.PRESETS << ERROR_DOMAIN_SHIFT | 1
+    INVALID_INDEX = ErrorDomain.PRESETS << ERROR_DOMAIN_SHIFT | 2
+    NOT_FOUND = ErrorDomain.PRESETS << ERROR_DOMAIN_SHIFT | 3
+    NAME_INVALID = ErrorDomain.PRESETS << ERROR_DOMAIN_SHIFT | 4
+    SAVE_FAILED = ErrorDomain.PRESETS << ERROR_DOMAIN_SHIFT | 5
+    PRESETS_FULL = ErrorDomain.PRESETS << ERROR_DOMAIN_SHIFT | 6
+    PARSE_FAILED = ErrorDomain.PRESETS << ERROR_DOMAIN_SHIFT | 7
+
+
+def decode_error_code(code):
+    """``(domain, item)`` of an error code, or None for None."""
+    return None if code is None else (code >> ERROR_DOMAIN_SHIFT, code & ERROR_ITEM_MASK)
 
 
 #: Codes by which the firmware positively lacks a command: unknown, or a usage error for its words.

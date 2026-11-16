@@ -5,6 +5,58 @@ All notable changes to this project are documented here. The format follows
 [semantic](https://semver.org/), with the 0.x caveat that the public API may
 still move between minor releases.
 
+## [0.6.5] - 2026-11-16
+
+Patch: one command at a time. The shell blocks on work the device starts itself,
+and a reply that outlived its deadline was taken as the next command's, shifting
+every reply after it. No reply has a deadline now, an abandoned wait is followed
+by a sync barrier, and the serial port is held exclusively. Protocol tables follow
+the official LZX Serial Port Guide.
+
+### Added
+
+- `ShellClient.sync()`, `synced`, `discarded`, `unsolicited`; `replies(*parts)`
+  for commands answering several lines. A new client and any abandoned wait
+  (stall, `KeyboardInterrupt`, transport error, spliced line) are unsynchronised;
+  the next command first sends `zz<nonce>` and discards everything before its echo.
+- `Reply.shaped(*keys)` and `ReplyShapeError`: `authors`, `enumerate_author`,
+  `programs list` pages, `fpga status` (`fpga_status`, `active_author`,
+  `wait_loaded`), `settings get` and `cpu` lines raise on a reply of the wrong shape.
+- `PortBusyError` (a `TransportUnavailableError`): `SerialTransport` opens the tty
+  with `flock` and `TIOCEXCL` and drains stale input; `open_shell` and
+  `Videomancer.open` raise it rather than fall back to libusb or MIDI only.
+- `const.SettingKey`, `SETTING_NAMES`, `SETTING_VALUES`, `TIMING_CODES`,
+  `MODULATOR_SETTING_KEY`, `MODULATOR_FIELDS`, `modulator_key`, `setting_name`,
+  `describe_setting`, `describe_midi_assign`, `CC_AUTO_PAIR`, `CC_LSB_SHIFT`,
+  `CC_NONE`; `ErrorDomain`, `PresetErrorCode`, `ShellErrorCode.INVALID_STATE`,
+  `LogLevel.CRITICAL`; `shell.setting_value`.
+- `pyvmancer.statewatch` and `vmancer watch --seconds --interval [--stall]`: a
+  read-only poll printing every change with key-table names, flagging a reboot from
+  boot count key 9 or USB re-enumeration, which it reconnects through.
+- `vmancer shell --stall`. `tqdm` is a dependency.
+
+### Changed
+
+- Every command is awaited on liveness. `ShellClient(transport, report=None,
+  stall=None, report_interval=...)` and `command(*parts, watch=None)` drop
+  `timeout`; `open_shell(serial_number=None, port=None, prefer="auto", **client)`
+  passes `report`/`stall` to the client.
+- `ShellError.code` is the documented 32-bit code (`domain << 26 | item`);
+  `ShellErrorCode` values are those codes, `ShellError.domain`/`item` split them,
+  and `const.decode_error_code` returns `(domain, item)`. Preset errors no longer
+  read as shell items.
+- `ROUTE_MODES` is the guide's table (0 Analog In .. 4 Auto); `route_name` of any
+  other value is `undocumented mode`. `read_route` reads only `file_not_found` as
+  absent.
+- `cpu()` merges every core's line. `listing_problems` lives in
+  `pyvmancer.programs` (still importable from `pyvmancer.shell`).
+- `read_setting` requires a `{"value": n}` object; a bare number is refused.
+
+### Removed
+
+- `ShellTimeoutError`, `ShellClient.timeout`, `vmancer shell --timeout`,
+  `shell.ERROR_TAG_MASK`, `shell.decode_error_code`.
+
 ## [0.6.4] - 2026-11-16
 
 Patch: the Vid Route Mode check, and program listings that are checked rather

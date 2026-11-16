@@ -6,6 +6,8 @@ import logging
 import numpy as np
 import pytest
 
+from pyvmancer.const import ShellErrorCode
+
 from pyvmancer import device as device_module
 from pyvmancer.const import (
     CC_MAP_UNASSIGNED,
@@ -139,9 +141,7 @@ def fakes_fixture():
 def vm_fixture(fakes):
     """A Videomancer with both links open onto fakes."""
     midi_transport, byte_transport = fakes
-    return Videomancer(
-        midi=MidiController(midi_transport), shell=ShellClient(byte_transport, timeout=0.2), info="INFO"
-    )
+    return Videomancer(midi=MidiController(midi_transport), shell=ShellClient(byte_transport), info="INFO")
 
 
 def test_has_links(vm):
@@ -213,7 +213,7 @@ def test_set_source_by_name(vm, fakes):
 def test_load_program_rereads_parameters_and_assigns_cc_map(vm, fakes, caplog):
     """A load re-reads ``program info`` and writes all 12 CC keys even when the map is already right."""
     vm.parameters()
-    fakes[1].on_error("programs authors", 1, "unknown command")
+    fakes[1].on_error("programs authors", ShellErrorCode.UNKNOWN_COMMAND, "unknown command")
     with caplog.at_level(logging.INFO, logger="pyvmancer.device"):
         vm.load_program("perlin", settle=0)
     written = fakes[1].written
@@ -236,9 +236,13 @@ def test_load_program_rereads_parameters_and_assigns_cc_map(vm, fakes, caplog):
 def test_load_program_reads_parameters_only_once_the_device_runs_it(vm, fakes, monkeypatch):
     """A device still answering "no program loaded" after ``program load`` is waited on, not read."""
     monkeypatch.setattr("pyvmancer.shell.time.sleep", lambda _: None)
-    fakes[1].on_error("programs authors", 1, "unknown command")
+    fakes[1].on_error("programs authors", ShellErrorCode.UNKNOWN_COMMAND, "unknown command")
     fakes[1].queue("fpga status", fakes[1].fpga("configuring", False, "Perlin"))
-    fakes[1].queue("program info", "!3:no program loaded", "!3:no program loaded")
+    fakes[1].queue(
+        "program info",
+        f"!{int(ShellErrorCode.SERVICE_UNAVAILABLE)}:no program loaded",
+        f"!{int(ShellErrorCode.SERVICE_UNAVAILABLE)}:no program loaded",
+    )
     vm.load_program("perlin", settle=0)
     assert fakes[1].written.count("fpga status") == 4
     assert vm.parameter("Levels").index == 0 and vm.cc_assignment.after.ok
@@ -246,7 +250,7 @@ def test_load_program_reads_parameters_only_once_the_device_runs_it(vm, fakes, m
 
 def test_load_program_raises_when_the_map_does_not_take(vm, fakes):
     """A slot that does not follow its settings write is an error, not a silent adaptation."""
-    fakes[1].on_error("programs authors", 1, "unknown command")
+    fakes[1].on_error("programs authors", ShellErrorCode.UNKNOWN_COMMAND, "unknown command")
     fakes[1].cc.set_setting = lambda key, value: fakes[1].cc.writes.append((key, value))
     fakes[1].cc.live[11] = 0
     with pytest.raises(CcMapError, match="P12 CC0"):
@@ -321,7 +325,7 @@ def test_midi_delegation(vm, fakes):
 
 def test_shell_delegation(vm, fakes):
     """The facade forwards the serial-only calls to the shell client."""
-    fakes[1].on_error("programs authors", 1, "unknown command")
+    fakes[1].on_error("programs authors", ShellErrorCode.UNKNOWN_COMMAND, "unknown command")
     fakes[1].on("programs list", '{"programs":["a"]}')
     fakes[1].on("program presets list", '{"factory":[]}')
     fakes[1].on("status", '{"product":"Videomancer"}')
@@ -401,7 +405,7 @@ def test_device_knowledge_delegation(vm, fakes):
     fakes[1].on("fs stat sd:/programs/x.vmprog", '{"size":322934}')
     fakes[1].on("fs hash sd:/programs/x.vmprog", '{"hash":"deadbeef","size":322934}')
     fakes[1].on("video status", '{"input":"analog","timing":"PAL","analog":{"locked":true}}')
-    fakes[1].on_error("video timing", 2, "usage: video timing <NTSC|PAL>")
+    fakes[1].on_error("video timing", ShellErrorCode.PARSE_ERROR, "usage: video timing <NTSC|PAL>")
     assert vm.program_manifest().version == "1.0.2"
     assert vm.file_hash("sd:/programs/x.vmprog") == "deadbeef"
     assert vm.video_state().source_locked
@@ -600,10 +604,10 @@ def _patch_usb_transport(monkeypatch, factory):
 def test_open_shell_uses_tty_first(monkeypatch):
     """The default preference opens the given tty."""
     _patch_serial_transport(monkeypatch, _FakeTransport)
-    client = open_shell(port="/dev/ttyFAKE", timeout=1.5)
+    client = open_shell(port="/dev/ttyFAKE", stall=1.5)
     assert isinstance(client, ShellClient)
     assert client.transport.args == ("/dev/ttyFAKE",)
-    assert client.timeout == 1.5
+    assert client.stall == 1.5
 
 
 def test_open_shell_tty_uses_discovery(monkeypatch):

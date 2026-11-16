@@ -240,10 +240,10 @@ def test_route_mismatch_fails_while_video_status_reads_hdmi_locked():
     assert "Vid Route Mode to HDMI In" in failed[0].fix
 
 
-def test_unconfirmed_route_values_are_shown_by_number():
-    """A value never observed is not named, in the reading or the fix."""
+def test_undocumented_route_values_are_shown_by_number():
+    """A value outside the guide's table is not named, in the reading or the fix."""
     finding = diagnose_route(3, 7)
-    assert finding.detail == "Vid Route Mode 3 (unconfirmed mode), expected 7 (unconfirmed mode)"
+    assert finding.detail == "Vid Route Mode 3 (Standalone), expected 7 (undocumented mode)"
     assert "the mode that reads 7" in finding.fix
 
 

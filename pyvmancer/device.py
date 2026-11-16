@@ -20,7 +20,7 @@ from .const import (
 )
 from .ccmap import assign_cc_map, reassert_cc_map, sink_cc, verify_cc_map
 from .discovery import find_device
-from .errors import DeviceNotFoundError, TransportUnavailableError, VmancerError
+from .errors import DeviceNotFoundError, PortBusyError, TransportUnavailableError, VmancerError
 from .midi import MidiController
 from .scaling import MIDI_7BIT_MAX
 from .shell import ShellClient
@@ -84,12 +84,11 @@ def _default_mido_port():
     raise TransportUnavailableError(f"no mido port matching {USB_PRODUCT!r}")
 
 
-def open_shell(serial_number=None, port=None, timeout=5.0, prefer="auto"):
-    """Open a :class:`~pyvmancer.shell.ShellClient` over the CDC serial link.
+def open_shell(serial_number=None, port=None, prefer="auto", **client):
+    """Open a :class:`~pyvmancer.shell.ShellClient` over the CDC serial link; ``client`` goes to it.
 
-    ``prefer`` selects the backend: ``"tty"`` (``/dev/ttyACM*`` via pyserial),
-    ``"usb"`` (libusb against ``/dev/bus/usb``, for environments with no tty
-    nodes), or ``"auto"`` to try tty then fall back to usb.
+    ``prefer`` is ``"tty"`` (pyserial), ``"usb"`` (libusb, for hosts with no tty nodes) or ``"auto"``,
+    tty then usb. A tty another process holds raises :class:`~pyvmancer.errors.PortBusyError`.
     """
     if prefer not in ("auto", "tty", "usb"):
         raise ValueError(f"prefer must be auto/tty/usb, got {prefer!r}")
@@ -98,7 +97,9 @@ def open_shell(serial_number=None, port=None, timeout=5.0, prefer="auto"):
         from .transports.serial_tty import SerialTransport
 
         try:
-            return ShellClient(SerialTransport(port or find_device(serial_number).tty), timeout=timeout)
+            return ShellClient(SerialTransport(port or find_device(serial_number).tty), **client)
+        except PortBusyError:
+            raise
         except (TransportUnavailableError, DeviceNotFoundError, TypeError, OSError) as err:
             if prefer == "tty":
                 raise
@@ -106,9 +107,7 @@ def open_shell(serial_number=None, port=None, timeout=5.0, prefer="auto"):
     from .transports.usb_cdc import UsbCdcTransport
 
     try:
-        return ShellClient(
-            UsbCdcTransport(vid=USB_VID, pid=USB_PID, serial_number=serial_number), timeout=timeout
-        )
+        return ShellClient(UsbCdcTransport(vid=USB_VID, pid=USB_PID, serial_number=serial_number), **client)
     except TransportUnavailableError as err:
         errors.append(err)
         raise TransportUnavailableError(f"no usable serial backend: {errors}") from err
@@ -212,6 +211,10 @@ class Videomancer:
         if shell:
             try:
                 shell_client = open_shell(serial_number=serial_number)
+            except PortBusyError:
+                if midi_ctl is not None:
+                    midi_ctl.close()
+                raise
             except Exception:
                 shell_client = None
         if midi_ctl is None and shell_client is None:

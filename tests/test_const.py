@@ -175,3 +175,53 @@ def test_param_defaults_shape():
 def test_embedded_programs_are_sorted_and_unique():
     """The embedded program list is a canonical sorted set."""
     assert list(const.EMBEDDED_PROGRAMS) == sorted(set(const.EMBEDDED_PROGRAMS))
+
+
+@pytest.mark.parametrize(
+    "key,name",
+    [
+        (1, "Video Route Mode"),
+        (19, "program author"),
+        (100, "P1 manual"),
+        (const.modulator_key(11, "source"), "P12 source"),
+        (const.modulator_key(2, "slope"), "P3 slope"),
+        (200, "MIDI Assign P1"),
+        (211, "MIDI Assign P12"),
+        (20, "key 20"),
+        (160, "key 160"),
+        (212, "key 212"),
+    ],
+)
+def test_setting_names_follow_the_guide(key, name):
+    """Named keys, the 100-159 modulator block and the 200-211 MIDI Assign block are named."""
+    assert const.setting_name(key) == name
+
+
+@pytest.mark.parametrize(
+    "key,value,shown",
+    [
+        (1, 3, "3 (Standalone)"),
+        (1, 9, "9"),
+        (8, 14, "14 (720p60)"),
+        (4, 2, "2 (channel 1)"),
+        (2, 7, "7 (Auto)"),
+        (7, "Cascade", "'Cascade'"),
+        (200, 0x1FF00, "130816 (CC 0 auto)"),
+        (200, 0x1FFFF, "131071 (none)"),
+        (205, 5 | 37 << 8, "9477 (CC 5 LSB 37)"),
+        (9, 41, "41"),
+    ],
+)
+def test_describe_setting_uses_the_guide_tables(key, value, shown):
+    """Enumerated keys show the guide's value names; MIDI Assign unpacks bits 0-7, 8-15 and 16."""
+    assert const.describe_setting(key, value) == shown
+
+
+def test_timing_codes_are_the_fpga_codes():
+    """Preferred Timing codes are the FPGA's 4-bit values, not list positions."""
+    assert (const.TIMING_CODES[0], const.TIMING_CODES[8], const.TIMING_CODES[10]) == (
+        "NTSC",
+        "PAL",
+        "1080i60",
+    )
+    assert len(const.TIMING_CODES) == 15 and max(const.TIMING_CODES) < 16

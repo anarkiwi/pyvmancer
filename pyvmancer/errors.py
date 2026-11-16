@@ -1,5 +1,7 @@
 """Exception hierarchy for pyvmancer."""
 
+from .const import decode_error_code
+
 
 class VmancerError(Exception):
     """Base class for all pyvmancer errors."""
@@ -17,6 +19,17 @@ class TransportUnavailableError(TransportError):
     """Transport backend is not usable (missing library, permissions, no device node)."""
 
 
+class PortBusyError(TransportUnavailableError):
+    """Another process holds the serial port; the shell serves one connection at a time."""
+
+    def __init__(self, port):
+        self.port = port
+        super().__init__(
+            f"{port} is held by another process; the Videomancer shell serves one connection at a time, "
+            f"so close the other client (e.g. find it with `fuser {port}`)"
+        )
+
+
 class FirmwareError(VmancerError):
     """A firmware release could not be resolved, downloaded, or flashed."""
 
@@ -24,8 +37,8 @@ class FirmwareError(VmancerError):
 class ShellError(VmancerError):
     """Device returned a ``!<code>:<message>`` response.
 
-    ``code`` is the numeric error code from the serial command guide; it is
-    ``None`` when the device sent an unparseable error line.
+    ``code`` is the 32-bit code, ``domain << 26 | item`` as the serial port guide lays it out;
+    it is ``None`` when the device sent an unparseable error line.
     """
 
     def __init__(self, code, message, command=None):
@@ -33,14 +46,29 @@ class ShellError(VmancerError):
         self.message = message
         self.command = command
         detail = f"{command!r}: " if command else ""
-        super().__init__(f"{detail}[{code}] {message}")
+        where = "" if code is None else f" (domain {self.domain}, item {self.item})"
+        super().__init__(f"{detail}[{code}{where}] {message}")
+
+    @property
+    def domain(self):
+        """The firmware domain that raised the error, or None."""
+        return None if self.code is None else decode_error_code(self.code)[0]
+
+    @property
+    def item(self):
+        """The error within its domain, or None."""
+        return None if self.code is None else decode_error_code(self.code)[1]
 
 
-class ShellTimeoutError(ShellError):
-    """Device did not reply to a command within the timeout."""
+class ReplyShapeError(VmancerError):
+    """A JSON reply lacks the fields its command answers with: it is not this command's reply."""
 
-    def __init__(self, command, timeout):
-        super().__init__(None, f"no response within {timeout}s", command)
+    def __init__(self, tag, payload, missing):
+        self.tag = tag
+        self.payload = payload
+        self.missing = tuple(missing)
+        want = f"fields {', '.join(self.missing)} as documented" if self.missing else "an object"
+        super().__init__(f"reply @{tag} lacks {want}: {payload[:200]!r}")
 
 
 class DeviceGoneError(TransportError):
