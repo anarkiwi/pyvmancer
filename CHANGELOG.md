@@ -5,6 +5,36 @@ All notable changes to this project are documented here. The format follows
 [semantic](https://semver.org/), with the 0.x caveat that the public API may
 still move between minor releases.
 
+## [0.6.4] - 2026-11-16
+
+Patch: the Vid Route Mode check, and program listings that are checked rather
+than trusted.
+
+### Added
+
+- `pyvmancer.route`: `read_route(shell)` reads Vid Route Mode from settings key 1;
+  `route_name`, `describe_route` and `parse_route` know the observed values only,
+  1 = HDMI In and 4 = Auto (`ROUTE_MODES`, `ROUTE_HDMI_IN`, `ROUTE_SETTING_KEY`).
+- `diagnose(shell, midi, route=...)` and `diagnose_route`: the `video.route` finding,
+  reported unchecked without an expected value. `vmancer doctor --route VALUE`.
+- `shell.read_setting(shell, key)`, `shell.listing_problems(...)`.
+- `ShellClient.active_author()` reads `fpga status` `browse_author`;
+  `enumerate_author(..., force=True)`.
+- `InterleavedReplyError`, `ProgramListError`; `ShellClient.foreign_lines`.
+
+### Fixed
+
+- `programs()` read any failure of `programs authors` as firmware without authors
+  and listed the active author alone, unqualified. Only an unknown-command or usage
+  error means that now; anything else raises.
+- Each author's listing is checked against its `programs enumerate` reply (author,
+  `count`, unique names, no `/`) and the device's active author, re-enumerated and
+  re-listed once, then raises naming both attempts.
+- The active-author skip trusted this client's memory; it now trusts the device's
+  `browse_author`, which another client can change.
+- A reply tagged for another command group is set aside, and a line with another
+  reply spliced into it raises, instead of either being parsed as this command's.
+
 ## [0.6.3] - 2026-11-16
 
 Patch: device-side work is awaited on liveness, not a deadline. The shell answers

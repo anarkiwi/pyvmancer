@@ -84,6 +84,7 @@ vmancer hash sd:/programs/x.vmprog
 vmancer resync                  # recover an output that stopped passing frames
 vmancer doctor                  # named checks with fixes; JSON on stdout, exit 1 on any failure
 vmancer doctor --latency        # also midi.latency and midi.backlog (writes, then restores P1)
+vmancer doctor --route hdmi-in  # fail video.route unless Vid Route Mode reads HDMI In (settings key 1 = 1)
 vmancer latency --param 1 --rates 5,10,20,40,80 --seconds 2   # CC write to readback timing
 vmancer cc-map                  # device MIDI CC map against the CCs pyvmancer sends; exit 1 on mismatch
 vmancer cc-map --restore --yes  # write every slot's CC via settings and verify (dry run without --yes)

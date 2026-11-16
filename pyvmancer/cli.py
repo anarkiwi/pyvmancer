@@ -16,11 +16,12 @@ from .diagnose import (
     format_finding,
     report,
 )
-from .const import OPERATORS, PARAM_COUNT
+from .const import OPERATORS, PARAM_COUNT, ROUTE_MODES
 from .device import Videomancer, open_midi, open_shell
 from .discovery import find_devices
 from .errors import VmancerError
 from .latency import DEFAULT_RATES, measure_latency, probe_cc_map
+from .route import parse_route
 
 
 def _param_value(text):
@@ -104,6 +105,13 @@ def build_parser():
     doctor = sub.add_parser("doctor", help="diagnose the device; exits 1 if any check fails")
     doctor.add_argument(
         "--latency", action="store_true", help="also measure MIDI latency (writes, then restores)"
+    )
+    doctor.add_argument(
+        "--route",
+        type=parse_route,
+        help="fail unless Vid Route Mode reads this settings value or observed mode: "
+        + ", ".join(f"{v} or {n.lower().replace(' ', '-')}" for v, n in ROUTE_MODES.items())
+        + " (default: report it)",
     )
     _add_latency_args(doctor)
     latency = sub.add_parser("latency", help="measure MIDI CC write to readback latency and backlog")
@@ -263,14 +271,14 @@ def _run_device(args):
     """Handle ``doctor`` and ``latency``, which open both links when latency is measured."""
     if args.command == "doctor" and not args.latency:
         with open_shell(serial_number=args.serial_number) as shell:
-            return _report(diagnose(shell))
+            return _report(diagnose(shell, route=args.route))
     with Videomancer.open(serial_number=args.serial_number, channel=args.channel) as device:
         latency = measure_latency(
             device, params=args.param, rates=args.rates, seconds=args.seconds, report=_note
         )
         findings = diagnose_latency(latency)
         if args.command == "doctor":
-            findings = diagnose(device.shell, device.midi) + findings
+            findings = diagnose(device.shell, device.midi, route=args.route) + findings
         return _report(findings, latency=latency.as_dict())
 
 

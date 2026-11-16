@@ -7,13 +7,17 @@ The command set is read from the device with :meth:`ShellClient.help`.
 
 import base64
 import json
+import re
 import time
+from collections import Counter
 
 from . import scaling
 from .const import (
+    ABSENT_COMMAND_CODES,
     BPM_MAX,
     BPM_MIN,
     BPM_SCALE,
+    COMMAND_GROUPS,
     PARAM_COUNT,
     PRESET_FIELDS,
     SHELL_MAX_LINE,
@@ -24,7 +28,15 @@ from .const import (
     TransportState,
     resolve_operator,
 )
-from .errors import ProgramLoadError, ShellError, ShellTimeoutError, VideoTimingIgnored, VmancerError
+from .errors import (
+    InterleavedReplyError,
+    ProgramListError,
+    ProgramLoadError,
+    ShellError,
+    ShellTimeoutError,
+    VideoTimingIgnored,
+    VmancerError,
+)
 from .liveness import POLL_S, REPORT_S, Watch
 from .programs import MANIFEST_PATH, ProgramManifest
 from .video import VideoStatus, parse_timings
@@ -49,6 +61,8 @@ PUT_CHUNK = 4096
 PUT_MAX_BYTES = 8 << 20
 #: Entries one ``fs ls`` page returns.
 LS_PAGE = 5
+#: The start of a reply or error line, found inside another line when two clients share the port.
+SPLICED = re.compile(rf"@(?:{'|'.join(sorted(COMMAND_GROUPS))}):|![0-9]+:")
 #: Pause between ``fpga status`` polls while a load completes; it paces serial traffic only.
 LOAD_POLL_S = 0.05
 
@@ -116,6 +130,44 @@ def written_count(reply, expected, command):
     if int(written) != expected:
         raise VmancerError(f"{command}: device wrote {written} of {expected} bytes")
     return int(written)
+
+
+def listing_problems(author, enumerated, names, active=None):
+    """What is wrong with ``names`` as ``author``'s listing; empty when it is consistent.
+
+    ``enumerated`` is the ``programs enumerate`` reply, whose ``author`` and ``count`` it must match;
+    ``active`` is the device's active author once listed, None when unreported. Names must be
+    unique and carry no ``/``, which would read as an author qualifier.
+    """
+    problems = []
+    answered = enumerated.get("author", author)
+    if answered != author:
+        problems.append(f"enumerate answered for {answered!r}")
+    if active is not None and active != author:
+        problems.append(f"the device's active author is {active!r}")
+    count = enumerated.get("count")
+    if isinstance(count, int) and len(names) != count:
+        problems.append(f"listed {len(names)} names against an enumerated count of {count}")
+    repeated = sorted(name for name, seen in Counter(names).items() if seen > 1)
+    if repeated:
+        problems.append(f"repeated {repeated}")
+    slashed = [name for name in names if "/" in name]
+    if slashed:
+        problems.append(f"names with a '/' {slashed}")
+    return "; ".join(problems)
+
+
+def read_setting(shell, key_id):
+    """One setting's integer value, from ``shell.get_setting``'s ``settings get`` reply."""
+    payload = shell.get_setting(key_id)
+    try:
+        reply = json.loads(payload)
+    except json.JSONDecodeError as err:
+        raise VmancerError(f"settings key {key_id} reply {payload!r} is not JSON") from err
+    value = reply.get("value") if isinstance(reply, dict) else reply
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise VmancerError(f"settings key {key_id} reply {reply!r} carries no integer value")
+    return value
 
 
 def decode_error_code(code):
@@ -217,7 +269,7 @@ class ShellClient:
         self.clock = time.monotonic
         self._buffer = bytearray()
         self.log_lines = []
-        self._author = None
+        self.foreign_lines = []
         self._enumerated = {}
 
     @property
@@ -257,18 +309,26 @@ class ShellClient:
         call instead of being dropped with the batch. Without a ``watch`` the
         wait ends at ``timeout``; with one, each read that brings nothing is a
         busy shell, and only the watch ends the wait.
+
+        A reply tagged with another group's word is another client's, kept in ``foreign_lines``;
+        a line with a reply spliced into it raises :class:`~pyvmancer.errors.InterleavedReplyError`.
         """
         deadline = self.clock() + timeout
+        group = command.split(" ", 1)[0]
         quiet = False
         while True:
             line = self._pop_line()
             while line is not None:
                 kind, value = parse_line(line)
-                if kind == "reply":
+                if SPLICED.search(line, 1):
+                    raise InterleavedReplyError(command, line)
+                if kind == "reply" and value.tag != group and value.tag in COMMAND_GROUPS:
+                    self.foreign_lines.append(line)
+                elif kind == "reply":
                     return value
-                if kind == "error":
+                elif kind == "error":
                     raise ShellError(value.code, value.message, command)
-                if value:
+                elif value:
                     self.log_lines.append(value)
                 line = self._pop_line()
             if watch is not None:
@@ -355,17 +415,24 @@ class ShellClient:
         """Program authors the firmware can enumerate (``programs authors``)."""
         return list(self.command("programs", "authors").json().get("authors", []))
 
-    def enumerate_author(self, author, watch=None):
+    def active_author(self, watch=None):
+        """The device's own active author, ``fpga status`` ``browse_author``; None when it does not say.
+
+        Another client can change it, so it is read from the device rather than remembered.
+        """
+        return self.command("fpga", "status", watch=watch).json().get("browse_author")
+
+    def enumerate_author(self, author, watch=None, force=False):
         """Make ``author`` the active author, returning the device's enumerate reply.
 
-        The command is skipped when the author is already active. The device
+        Unless ``force``, the command is skipped when the device itself reports
+        ``author`` active and this client holds its enumerate reply. The device
         rebuilds the list from the card, so the reply is awaited on liveness.
         """
-        if author != self._author:
-            self._author = None
-            watch = watch or self.watch(f"enumerating {author}")
+        watch = watch or self.watch(f"enumerating {author}")
+        if force or author not in self._enumerated or self.active_author(watch) != author:
+            self._enumerated.pop(author, None)
             self._enumerated[author] = self.command("programs", "enumerate", author, watch=watch).json()
-            self._author = author
         return self._enumerated[author]
 
     def _active_programs(self):
@@ -381,30 +448,50 @@ class ShellClient:
             offset = nxt
 
     def _authors_or_none(self):
-        """Authors, or None on firmware without ``programs authors``."""
+        """Authors, or None on firmware that answers ``programs authors`` as a command it lacks.
+
+        Any other failure, a timeout, a busy shell or a garbled reply, raises:
+        listing only the active author would pass for the whole library.
+        """
         try:
             return self.authors()
-        except ShellError:
+        except ShellError as err:
+            if isinstance(err, ShellTimeoutError) or err.code not in ABSENT_COMMAND_CODES:
+                raise
             return None
+
+    def _listed(self, author):
+        """``author``'s names, checked by :func:`listing_problems`; re-enumerated and re-listed once.
+
+        Raises :class:`~pyvmancer.errors.ProgramListError` naming both attempts' problems.
+        """
+        problems = []
+        for _ in range(2):
+            enumerated = self.enumerate_author(author, force=True)
+            names = self._active_programs()
+            problem = listing_problems(author, enumerated, names, self.active_author())
+            if not problem:
+                return names
+            problems.append(problem)
+        raise ProgramListError(author, problems)
 
     def programs(self, author=None):
         """Program names for ``author``, or for every author when None.
 
         Across authors, ``lzx`` names stay plain and the rest are ``author/Name``;
         order is ``lzx`` first, then the other authors sorted. Firmware without
-        authors lists its single set unqualified.
+        authors lists its single set unqualified. Each author's listing is
+        cross-checked against its enumerate reply by :meth:`_listed`.
         """
         if author is not None:
-            self.enumerate_author(author)
-            return self._active_programs()
+            return self._listed(author)
         authors = self._authors_or_none()
         if authors is None:
             return self._active_programs()
         names = []
         for name in sorted(authors, key=lambda a: (a != DEFAULT_AUTHOR, a)):
-            self.enumerate_author(name)
             prefix = "" if name == DEFAULT_AUTHOR else f"{name}/"
-            names.extend(prefix + n for n in self._active_programs())
+            names.extend(prefix + n for n in self._listed(name))
         return names
 
     def load_program(self, name, settle=1.5):
@@ -420,7 +507,7 @@ class ShellClient:
         if not slash:
             author, plain = DEFAULT_AUTHOR, name
         watch = self.watch(f"loading {name}")
-        if author != self._author and (slash or self._authors_or_none() is not None):
+        if slash or self._authors_or_none() is not None:
             self.enumerate_author(author, watch)
         self._ok("program", "load", plain, watch=watch)
         self.wait_loaded(plain, watch=watch)

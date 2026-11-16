@@ -116,6 +116,15 @@ Observed on `1.0.1`.
   capture, recording it in `assign_events`, and raises `CcMapError` on any other
   change. Callers driving a pass should `verify_cc_map()` at its end.
 
+## Two clients on the port corrupt replies
+
+The shell answers whoever writes, so two processes on one port interleave their
+replies. One reply arrived as `{"ac@programs:{"author":"czartroniks",...`, a
+`programs enumerate` reply spliced into another command's. `ShellClient` raises
+`InterleavedReplyError` for such a line and sets aside a reply tagged for another
+command group. A listing taken meanwhile can also be short or another author's,
+which the enumerate `count` and `browse_author` cross-checks catch.
+
 ## Error codes are tagged
 
 Documented codes are 1-10. This firmware returns them as `0x58000000 | n`, so a
@@ -277,6 +286,22 @@ The reference itself must leave P12 open: P12 is the crossfader and gates the
 output even in programs whose `program info` names it `Null 12`, so parking it
 at zero blacks the device out entirely and every subsequent measurement is
 degenerate. `pyvmancer.const.PARK_REFERENCE` zeroes P1-P11 and opens P12.
+
+## Vid Route Mode is settings key 1
+
+On `1.0.1`, SETTINGS > Vid Route Mode is settings key 1 (`uint32`): it read 4
+under Auto and 1 under HDMI In (`settings get 1` answers
+`{"key":1,"type":"uint32","value":1}`). The panel also offers Dual In,
+Standalone and Analog In, whose values are unobserved, so `pyvmancer.route`
+names only 1 and 4 and shows any other value by number.
+
+The route decides what the processor is fed, separately from the input `video
+status` reports. With the route found on Dual In, `video status` still read
+source `hdmi`, the HDMI input locked and the transmitter active, Passthru ran,
+and every program output exact zero; setting HDMI In restored the picture. No
+other `video status` field shows this, so a rig that needs one route compares
+key 1 with it: `vmancer doctor --route hdmi-in` fails `video.route` on any other
+value, and plain `vmancer doctor` reports the value unchecked.
 
 ## `video status` flags are advisory
 

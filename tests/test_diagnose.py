@@ -4,8 +4,8 @@ import json
 
 import pytest
 
-from pyvmancer.const import DEFAULT_CC_MSB
-from pyvmancer.diagnose import Finding, diagnose, diagnose_video, format_finding, report
+from pyvmancer.const import DEFAULT_CC_MSB, ROUTE_HDMI_IN
+from pyvmancer.diagnose import Finding, diagnose, diagnose_route, diagnose_video, format_finding, report
 from pyvmancer.video import VideoStatus
 
 from .conftest import FakeCcMap
@@ -157,8 +157,8 @@ def test_checks_without_inputs_are_skipped(data, expected):
 class FakeShell(FakeCcMap):
     """The reads ``diagnose`` makes, answered from fixtures."""
 
-    def __init__(self, fpga, video, live=DEFAULT_CC_MSB):
-        super().__init__(live)
+    def __init__(self, fpga, video, live=DEFAULT_CC_MSB, route=ROUTE_HDMI_IN):
+        super().__init__(live, route=route)
         self.fpga, self.video = fpga, video
 
     def version(self):
@@ -185,7 +185,8 @@ def test_diagnose_runs_device_checks_first():
         Finding("fpga.running", True, "state running, configured True, program Passthru"),
     ]
     assert findings[2].check == "midi.cc_map" and findings[2].ok
-    assert len(findings) == 7
+    assert findings[3] == Finding("video.route", True, "Vid Route Mode 1 (HDMI In)")
+    assert len(findings) == 8
 
 
 @pytest.mark.parametrize(
@@ -199,7 +200,11 @@ def test_fpga_not_running(fpga):
 
 def test_fpga_without_state_is_skipped():
     """An ``fpga status`` lacking ``state`` contributes no finding."""
-    assert [f.check for f in diagnose(FakeShell({}, {}))] == ["firmware.version", "midi.cc_map"]
+    assert [f.check for f in diagnose(FakeShell({}, {}))] == [
+        "firmware.version",
+        "midi.cc_map",
+        "video.route",
+    ]
 
 
 def test_report_and_format():
@@ -213,3 +218,37 @@ def test_report_and_format():
         "FAIL video.genlock: output held at NTSC while hdmi input is locked at 1080p30 -> on the front panel"
     )
     assert report([]) == {"ok": True, "findings": []}
+
+
+def _route(shell, expected):
+    """The ``video.route`` finding of a full diagnosis."""
+    return {f.check: f for f in diagnose(shell, route=expected)}.get("video.route")
+
+
+def test_route_matching_expected_passes():
+    """Vid Route Mode reading the expected value passes, naming the observed mode."""
+    finding = _route(FakeShell(RUNNING, GOOD), ROUTE_HDMI_IN)
+    assert finding == Finding("video.route", True, "Vid Route Mode 1 (HDMI In), expected 1 (HDMI In)")
+
+
+def test_route_mismatch_fails_while_video_status_reads_hdmi_locked():
+    """Under another route the hdmi input still reads locked, so only the route finding fails."""
+    findings = diagnose(FakeShell(RUNNING, GOOD, route=4), route=ROUTE_HDMI_IN)
+    failed = [f for f in findings if not f.ok]
+    assert [f.check for f in failed] == ["video.route"]
+    assert failed[0].detail == "Vid Route Mode 4 (Auto), expected 1 (HDMI In)"
+    assert "Vid Route Mode to HDMI In" in failed[0].fix
+
+
+def test_unconfirmed_route_values_are_shown_by_number():
+    """A value never observed is not named, in the reading or the fix."""
+    finding = diagnose_route(3, 7)
+    assert finding.detail == "Vid Route Mode 3 (unconfirmed mode), expected 7 (unconfirmed mode)"
+    assert "the mode that reads 7" in finding.fix
+
+
+def test_unreported_route_skips_unless_expected():
+    """A firmware without the key reports nothing, unless a route is expected."""
+    assert _route(FakeShell(RUNNING, GOOD, route=None), None) is None
+    finding = _route(FakeShell(RUNNING, GOOD, route=None), ROUTE_HDMI_IN)
+    assert not finding.ok and finding.detail == "Vid Route Mode not reported, expected 1 (HDMI In)"
