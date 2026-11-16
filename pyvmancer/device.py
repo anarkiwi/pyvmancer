@@ -270,7 +270,7 @@ class Videomancer:
         return self.assign_cc_map("preset")
 
     def load_program(self, name, settle=1.5):
-        """Load a program by name or ``author/Name``; once it runs, read its parameters and assign the CC map."""
+        """Load ``Name`` or ``author/Name``; once it runs, read its parameters and assign the CC map."""
         result = self.shell.load_program(name, settle=settle)
         self.program = name
         self.consume_midi_assign()
