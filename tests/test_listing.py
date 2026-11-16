@@ -2,8 +2,9 @@
 
 import pytest
 
-from pyvmancer.errors import InterleavedReplyError, ProgramListError, ShellError, ShellTimeoutError
-from pyvmancer.shell import ERROR_TAG_MASK, listing_problems
+from pyvmancer.const import PresetErrorCode, ShellErrorCode
+from pyvmancer.errors import InterleavedReplyError, ProgramListError, ReplyShapeError, ShellError, StallError
+from pyvmancer.shell import listing_problems
 
 from .test_shell import multi_author
 
@@ -33,7 +34,7 @@ def test_enumerate_skips_only_when_the_device_reports_the_author_active(shell, b
 def test_enumerate_without_browse_author_always_sends(shell, byte_transport):
     """A device that does not report its active author is enumerated every time."""
     byte_transport.on("fpga status", '{"state":"running"}')
-    byte_transport.on("programs enumerate lzx", '{"author":"lzx"}')
+    byte_transport.on("programs enumerate lzx", '{"author":"lzx","count":0}')
     shell.enumerate_author("lzx")
     shell.enumerate_author("lzx")
     assert byte_transport.written.count("programs enumerate lzx") == 2
@@ -41,7 +42,11 @@ def test_enumerate_without_browse_author_always_sends(shell, byte_transport):
 
 @pytest.mark.parametrize(
     "error",
-    [(3, "busy"), (4, "buffer overflow")],
+    [
+        (ShellErrorCode.SERVICE_UNAVAILABLE, "busy"),
+        (ShellErrorCode.BUFFER_OVERFLOW, "buffer overflow"),
+        (PresetErrorCode.INVALID_INDEX, "a preset domain item 2 is no usage error"),
+    ],
 )
 def test_authors_failure_is_never_read_as_legacy_firmware(shell, byte_transport, error):
     """Only an unknown-command or usage error means no authors; anything else raises."""
@@ -52,17 +57,29 @@ def test_authors_failure_is_never_read_as_legacy_firmware(shell, byte_transport,
     assert "programs list" not in byte_transport.written
 
 
-def test_authors_timeout_raises(shell, byte_transport):
-    """A silent ``programs authors`` is a timeout, not firmware without authors."""
+def test_silent_authors_stalls_rather_than_reading_as_absent(shell, byte_transport, clocked):
+    """A silent ``programs authors`` is waited on; only the opt-in stall guard ends it, and it raises."""
+    del clocked
     byte_transport.silence("programs authors")
-    shell.timeout = 0.05
-    with pytest.raises(ShellTimeoutError):
+    shell.stall = 1.0
+    with pytest.raises(StallError):
         shell.programs()
+    assert "programs list" not in byte_transport.written
 
 
-@pytest.mark.parametrize("code", [1, 2, ERROR_TAG_MASK | 2])
+@pytest.mark.parametrize(
+    "payload", ['["lzx"]', '{"count":1}', '{"authors":"lzx"}', '{"count":40,"programs":["a"]}']
+)
+def test_authors_of_the_wrong_shape_raise(shell, byte_transport, payload):
+    """A reply that is not an authors object raises instead of reading as no authors."""
+    byte_transport.on("programs authors", payload)
+    with pytest.raises(ReplyShapeError, match="authors"):
+        shell.authors()
+
+
+@pytest.mark.parametrize("code", [ShellErrorCode.UNKNOWN_COMMAND, ShellErrorCode.PARSE_ERROR])
 def test_absent_authors_command_lists_one_set(shell, byte_transport, code):
-    """Unknown command and usage errors, tagged or not, are the firmware lacking ``programs authors``."""
+    """Unknown command and usage errors are the firmware lacking ``programs authors``."""
     byte_transport.on_error("programs authors", code, "unknown command")
     byte_transport.on("programs list", '{"programs":["a"]}')
     assert shell.programs() == ["a"]
@@ -87,7 +104,7 @@ def test_short_listing_is_relisted_then_accepted(shell, byte_transport):
             "listed 2 names against an enumerated count of 3",
         ),
         ('{"author":"lzx","count":2}', '{"programs":["a","a"]}', "repeated ['a']"),
-        ('{"author":"lzx"}', '{"programs":["x/a"]}', "names with a '/' ['x/a']"),
+        ('{"author":"lzx","count":1}', '{"programs":["x/a"]}', "names with a '/' ['x/a']"),
         ('{"author":"czartroniks","count":1}', '{"programs":["a"]}', "enumerate answered for 'czartroniks'"),
     ],
 )

@@ -1,17 +1,17 @@
 """Front panel SETTINGS > Vid Route Mode, read from its settings key.
 
 The route decides what the processor is fed, whatever input ``video status`` reports.
-Only values in :data:`~pyvmancer.const.ROUTE_MODES` are observed; any other is shown by number.
+Values and names are the serial port guide's Setting Keys table, :data:`~pyvmancer.const.ROUTE_MODES`.
 """
 
-from .const import ROUTE_MODES, ROUTE_SETTING_KEY
-from .errors import ShellError, ShellTimeoutError
+from .const import ROUTE_MODES, ROUTE_SETTING_KEY, ShellErrorCode
+from .errors import ShellError
 from .shell import read_setting
 
 
 def route_name(value):
-    """The panel name of an observed route value, else ``unconfirmed mode``."""
-    return ROUTE_MODES.get(value, "unconfirmed mode")
+    """The panel name of a route value, else ``undocumented mode``."""
+    return ROUTE_MODES.get(value, "undocumented mode")
 
 
 def describe_route(value):
@@ -25,7 +25,7 @@ def _slug(text):
 
 
 def parse_route(text):
-    """A route value from an integer or an observed mode's name, e.g. ``1``, ``hdmi-in`` or ``Auto``."""
+    """A route value from an integer or a mode's name, e.g. ``1``, ``hdmi-in`` or ``Auto``."""
     by_name = {_slug(name): value for value, name in ROUTE_MODES.items()}
     if _slug(text) in by_name:
         return by_name[_slug(text)]
@@ -38,13 +38,13 @@ def parse_route(text):
 
 
 def read_route(shell):
-    """Vid Route Mode as its settings value, or None when the firmware answers the key as an error.
+    """Vid Route Mode as its settings value, or None when the firmware answers the key as not found.
 
-    A timeout raises rather than reading as absent.
+    Any other error raises rather than reading as absent.
     """
     try:
         return read_setting(shell, ROUTE_SETTING_KEY)
     except ShellError as err:
-        if isinstance(err, ShellTimeoutError):
+        if err.code != ShellErrorCode.FILE_NOT_FOUND:
             raise
         return None

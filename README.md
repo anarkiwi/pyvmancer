@@ -94,7 +94,8 @@ vmancer video timings           # timing standards the firmware accepts
 vmancer video timing 1080p30    # set the output timing and confirm it took
 vmancer video input hdmi        # select the video input
 vmancer shell modulation status # run any raw shell command
-vmancer shell --timeout 30 fs ls sd:/   # longer reply deadline for a raw command
+vmancer shell --stall 30 fs ls sd:/     # every reply is awaited while the device is on USB; opt-in stall guard
+vmancer watch --seconds 600 --interval 2 # read-only: print every state change the device makes, flag reboots
 ```
 
 ## Firmware upgrade

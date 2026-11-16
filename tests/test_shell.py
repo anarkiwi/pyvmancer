@@ -5,21 +5,28 @@ import json
 
 import pytest
 
-from pyvmancer.const import PARAM_COUNT, PARAM_MAX, SHELL_MAX_LINE, PresetBank, TransportState
+from pyvmancer.const import (
+    PARAM_COUNT,
+    PARAM_MAX,
+    SHELL_MAX_LINE,
+    ErrorDomain,
+    PresetBank,
+    PresetErrorCode,
+    ShellErrorCode,
+    TransportState,
+    decode_error_code,
+)
 from pyvmancer.errors import (
     ShellError,
-    ShellTimeoutError,
     VideoTimingIgnored,
     VmancerError,
 )
 from pyvmancer.programs import MANIFEST_PATH
 from pyvmancer.shell import (
-    ERROR_TAG_MASK,
     PUT_MAX_BYTES,
     READ_CHUNK,
     Reply,
     ShellClient,
-    decode_error_code,
     decoded_limit,
     encode_preset,
     parse_line,
@@ -44,11 +51,12 @@ def test_parse_reply_payload_may_contain_colons():
 
 
 def test_parse_error_line():
-    """A ``!`` line yields a ShellError carrying the decoded code."""
-    kind, value = parse_line("!2:parse error\n")
+    """A ``!`` line yields a ShellError carrying the code and its domain and item."""
+    kind, value = parse_line("!1476395010:parse error\n")
     assert kind == "error"
     assert isinstance(value, ShellError)
-    assert (value.code, value.message) == (2, "parse error")
+    assert (value.code, value.message) == (ShellErrorCode.PARSE_ERROR, "parse error")
+    assert (value.domain, value.item) == (ErrorDomain.SHELL, 2)
 
 
 def test_parse_error_line_with_unparseable_code():
@@ -66,11 +74,21 @@ def test_parse_log_line(line):
 
 
 @pytest.mark.parametrize(
-    "raw,expected", [(1476395010, 2), (ERROR_TAG_MASK | 10, 10), (2, 2), (0, 0), (None, None)]
+    "raw,expected",
+    [(1476395010, (22, 2)), (1476395019, (22, 11)), (1543503873, (23, 1)), (2, (0, 2)), (None, None)],
 )
 def test_decode_error_code(raw, expected):
-    """The firmware error tag is stripped; untagged codes pass through."""
+    """A code is ``domain << 26 | item``, as the serial port guide documents."""
     assert decode_error_code(raw) == expected
+
+
+def test_preset_and_shell_items_do_not_collide():
+    """A presets error with item 1 is not the shell's unknown command."""
+    assert PresetErrorCode.NO_PROGRAM != ShellErrorCode.UNKNOWN_COMMAND
+    assert (
+        decode_error_code(PresetErrorCode.NO_PROGRAM)[1]
+        == decode_error_code(ShellErrorCode.UNKNOWN_COMMAND)[1]
+    )
 
 
 def test_reply_ok_json_and_repr():
@@ -89,9 +107,9 @@ def test_reply_json_error():
 
 def test_shell_error_message_includes_command():
     """Errors raised for a command quote it."""
-    err = ShellError(6, "not found", "fs stat sd:/x")
+    err = ShellError(ShellErrorCode.FILE_NOT_FOUND, "not found", "fs stat sd:/x")
     assert "fs stat sd:/x" in str(err)
-    assert "[6] not found" in str(err)
+    assert "[1476395014 (domain 22, item 6)] not found" in str(err)
 
 
 def test_command_joins_parts_and_drops_empties(shell, byte_transport):
@@ -115,18 +133,12 @@ def test_command_rejects_overlong_line(shell):
 
 def test_error_reply_raises_shell_error(shell, byte_transport):
     """A ``!`` reply becomes a ShellError naming the originating command."""
-    byte_transport.on_error("version", 1, "unknown command")
+    byte_transport.on_error("version", ShellErrorCode.UNKNOWN_COMMAND, "unknown command")
     with pytest.raises(ShellError) as excinfo:
         shell.version()
-    assert excinfo.value.code == 1
+    assert excinfo.value.code == ShellErrorCode.UNKNOWN_COMMAND
     assert excinfo.value.command == "version"
-
-
-def test_timeout_when_device_is_silent(shell, byte_transport):
-    """No reply within the timeout raises ShellTimeoutError."""
-    byte_transport.silence("version")
-    with pytest.raises(ShellTimeoutError, match="no response within"):
-        shell.command("version", timeout=0.05)
+    assert shell.synced
 
 
 def test_log_lines_accumulate(shell, byte_transport):
@@ -138,12 +150,11 @@ def test_log_lines_accumulate(shell, byte_transport):
 
 def test_partial_lines_are_buffered(shell, byte_transport):
     """A reply split across reads is reassembled."""
+    shell.sync()
     byte_transport.silence("version")
-    byte_transport.write(b"version\n")
-    byte_transport._pending.extend(b"@ver")
-    assert byte_transport.read() == b"@ver"
-    byte_transport._pending.extend(b"@version:1\n")
-    assert shell.command("version", timeout=0.5).payload == "1"
+    chunks = [b"@ver", b"", b"sion:1", b"\n"]
+    byte_transport.tick = lambda: byte_transport._pending.extend(chunks.pop(0) if chunks else b"")
+    assert shell.command("version").payload == "1"
 
 
 def test_version_and_serial(shell, byte_transport):
@@ -230,7 +241,6 @@ JSON_COMMANDS = [
     ("get_preset", (0, PresetBank.FACTORY), "program presets get 0 factory"),
     ("delete_preset", (3,), "program presets delete 3"),
     ("video_status", (), "video status"),
-    ("fpga_status", (), "fpga status"),
     ("remote_status", (), "remote status"),
     ("msd_status", (), "msd status"),
     ("fs_info", (), "fs info"),
@@ -245,7 +255,7 @@ JSON_COMMANDS = [
 def test_json_commands_emit_expected_line(byte_transport, method, args, expected):
     """Every JSON-returning command renders one exact line and decodes its payload."""
     byte_transport.on(expected, '{"ok":true}')
-    client = ShellClient(byte_transport, timeout=0.2)
+    client = ShellClient(byte_transport)
     assert getattr(client, method)(*args) == {"ok": True}
     assert byte_transport.last == expected
 
@@ -345,14 +355,14 @@ def test_set_source_resolves_operator_names(shell, byte_transport, source, code)
 
 def legacy(byte_transport):
     """Script firmware that predates ``programs authors``."""
-    return byte_transport.on_error("programs authors", 1, "unknown command")
+    return byte_transport.on_error("programs authors", ShellErrorCode.UNKNOWN_COMMAND, "unknown command")
 
 
 def multi_author(byte_transport, listings):
-    """Script ``programs authors`` plus an enumerate/list pair per author."""
+    """Script ``programs authors`` plus an enumerate reply per author; ``listings`` maps each to its count."""
     byte_transport.on("programs authors", json.dumps({"count": len(listings), "authors": list(listings)}))
-    for author in listings:
-        byte_transport.on(f"programs enumerate {author}", json.dumps({"author": author}))
+    for author, count in listings.items():
+        byte_transport.on(f"programs enumerate {author}", json.dumps({"author": author, "count": count}))
     return byte_transport
 
 
@@ -395,7 +405,7 @@ def test_enumerate_author_skips_when_active(shell, byte_transport):
 
 def test_programs_merges_authors_with_qualified_names(shell, byte_transport):
     """lzx stays plain and sorts first; other authors are prefixed and sorted."""
-    multi_author(byte_transport, {"teletect": 0, "czartroniks": 0, "lzx": 0, "boneoh": 0})
+    multi_author(byte_transport, {"teletect": 0, "czartroniks": 1, "lzx": 2, "boneoh": 1})
     lists = {
         "lzx": '{"programs":["Teletext","Isotherm"]}',
         "czartroniks": '{"programs":["Teletext"]}',
@@ -410,7 +420,7 @@ def test_programs_merges_authors_with_qualified_names(shell, byte_transport):
 
 def test_programs_for_one_author_is_plain_and_paged(shell, byte_transport):
     """An explicit author returns unqualified names and pages within the author."""
-    multi_author(byte_transport, {"czartroniks": 0})
+    multi_author(byte_transport, {"czartroniks": 3})
     byte_transport.on("programs list", '{"programs":["a","b"],"more":true,"next":2}')
     byte_transport.on("programs list 2", '{"programs":["c"],"more":false}')
     assert shell.programs("czartroniks") == ["a", "b", "c"]
@@ -542,7 +552,7 @@ def test_read_file_empty_file(shell, byte_transport):
 
 def test_read_limit_falls_back_when_caps_fail(shell, byte_transport):
     """An unsupported ``fs caps`` falls back to the conservative default."""
-    byte_transport.on_error("fs caps", 1, "unknown command")
+    byte_transport.on_error("fs caps", ShellErrorCode.UNKNOWN_COMMAND, "unknown command")
     assert shell._read_limit() == decoded_limit(READ_CHUNK)
 
 
@@ -796,7 +806,7 @@ def _script_video(byte_transport, locked, timing="1080p30", usage="NTSC|PAL|1080
     byte_transport.on(
         "video status", json.dumps({"input": "hdmi", "timing": timing, "hdmi": {"locked": locked}})
     )
-    byte_transport.on_error("video timing", 2, f"usage: video timing <{usage}>")
+    byte_transport.on_error("video timing", ShellErrorCode.PARSE_ERROR, f"usage: video timing <{usage}>")
 
 
 def test_video_timings_read_from_the_usage_string(shell, byte_transport):
@@ -865,7 +875,7 @@ def _script_output(byte_transport, output_timing, usage="NTSC|PAL|1080p30"):
         "video status",
         json.dumps({"source": "hdmi", "timing": output_timing, "output": {"timing": output_timing}}),
     )
-    byte_transport.on_error("video timing", 2, f"usage: video timing <{usage}>")
+    byte_transport.on_error("video timing", ShellErrorCode.PARSE_ERROR, f"usage: video timing <{usage}>")
 
 
 def test_apply_video_timing_confirms_the_output(shell, byte_transport):
@@ -898,5 +908,5 @@ def test_apply_video_timing_rejects_an_unknown_standard(shell, byte_transport):
 def test_apply_video_timing_without_a_usage_list(shell, byte_transport):
     """Firmware that names no standards is not second-guessed."""
     _script_output(byte_transport, "PAL", usage="")
-    byte_transport.on_error("video timing", 2, "usage")
+    byte_transport.on_error("video timing", ShellErrorCode.PARSE_ERROR, "usage")
     assert shell.apply_video_timing("PAL", sleep=lambda _: None).timing == "PAL"

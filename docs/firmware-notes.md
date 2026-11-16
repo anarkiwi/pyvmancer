@@ -1,8 +1,8 @@
 # Firmware notes
 
-Observations from a Videomancer running `1.0.0-rc.37`, `1.0.0-rc.40` and `1.0.1`.
-The published LZX documentation describes a `2.1.0` firmware, and the two differ
-in several places. Always treat `help` and `fs caps` as authoritative.
+Observations from a Videomancer running `1.0.0-rc.37`, `1.0.0-rc.40` and `1.0.1`,
+beyond what the [LZX Serial Port Guide](https://lzxindustries.net/instruments/videomancer/manual/serial-command-guide) documents. Treat `help` and `fs caps` as authoritative
+for the connected unit.
 
 ## `settings export` resets the USB link (`rc.37`)
 
@@ -125,18 +125,39 @@ replies. One reply arrived as `{"ac@programs:{"author":"czartroniks",...`, a
 command group. A listing taken meanwhile can also be short or another author's,
 which the enumerate `count` and `browse_author` cross-checks catch.
 
-## Error codes are tagged
+## The shell blocks on device-initiated work
 
-Documented codes are 1-10. This firmware returns them as `0x58000000 | n`, so a
-usage error arrives as `1476395010`. `pyvmancer.shell.decode_error_code` strips
-the tag; `ShellError.code` is the decoded value.
+On `1.0.1` the device re-indexes the program-picker author on its own, and the
+shell answers nothing while it does: one `programs list` answered after 10.7 s,
+with another author's list. A client with a 5 s reply deadline gave up, sent its
+next command while the first was outstanding, and took the late `@programs:`
+reply (same tag) as the answer to the next command; every later reply was then
+shifted by one, and `programs authors` read a list reply as no authors. The guide
+says to wait for each response before sending the next command; 0.6.5 drops reply
+deadlines and resynchronises after any abandoned wait (protocol.md, "One command
+at a time"). The guide notes `1.0.2` scans authors without blocking the port.
 
-## Command set is much larger than documented
+The program picker's author is restored at boot from settings key 19.
 
-`help` reports 64 commands against the ~30 in the published guide. The additions
-that matter for automation are the whole `modulation` group (`status`, `source`,
-`set`, `reset`, `cc-map`, `latch`, `audio status`), `program info`, the `video`
-and `remote` groups, and `settings get`/`set`/`reset`.
+## A pipelined backlog can reboot the device
+
+Writing about 20 KB of command lines while the shell was busy rebooted the unit:
+boot count (key 9) rose and USB re-enumerated. A 1.3 KB backlog came back intact.
+`ShellClient` only ever has one command outstanding, plus a short sync barrier
+after an abandoned wait. `vmancer watch` flags a reboot from key 9 or a USB
+re-enumeration.
+
+## The settings store is smaller than the key space
+
+`ram` reports `"settings":{"used":64,"capacity":64}`, while the documented keys
+(19 named, 60 modulator, 12 MIDI Assign) number 91: keys 133-159 answer
+`setting not found`. `vmancer watch` reads such a key as absent.
+
+## Command set
+
+`help` reports 64 commands. The guide documents them; earlier LZX docs did not
+cover the `modulation` group, `program info`, the `video` and `remote` groups or
+`settings get`/`set`/`reset`.
 
 ## Not every command acknowledges with `ok`
 
@@ -172,8 +193,7 @@ and the chunk size was in the wrong units, so no file read back correctly.
 `{"hash": "<sha256 hex>", "size": n}` computed on the device, without moving the
 file over the 256-byte-per-chunk read path.
 
-It hashes at about **79 kB/s**, so the reply routinely takes longer than the
-shell client's 5.0s default timeout:
+It hashes at about **79 kB/s**:
 
 | File | Size | Time | Rate |
 | --- | --- | --- | --- |
@@ -181,13 +201,8 @@ shell client's 5.0s default timeout:
 | `blizzard.vmprog` | 322934 B | 3.98 s | 79.3 kB/s |
 | `combing.vmprog` | 439221 B | 5.40 s | 79.4 kB/s |
 
-Program binaries run 320-440 kB, so most exceed a 5-second deadline and the
-largest exceed it every time; only the small manifest fits.
-`ShellClient.hash_file` therefore awaits the reply on liveness rather than a deadline.
-
-Commands whose payload is chunked need none of this: `fs read` and `fs write`
-each carry at most a few hundred bytes, so they finish well inside the default
-reply deadline.
+Program binaries run 320-440 kB, so a hash takes seconds; like every command it
+is awaited on liveness.
 
 ## `fs put` is the only usable upload path, and it owns the link
 
@@ -289,11 +304,9 @@ degenerate. `pyvmancer.const.PARK_REFERENCE` zeroes P1-P11 and opens P12.
 
 ## Vid Route Mode is settings key 1
 
-On `1.0.1`, SETTINGS > Vid Route Mode is settings key 1 (`uint32`): it read 4
-under Auto and 1 under HDMI In (`settings get 1` answers
-`{"key":1,"type":"uint32","value":1}`). The panel also offers Dual In,
-Standalone and Analog In, whose values are unobserved, so `pyvmancer.route`
-names only 1 and 4 and shows any other value by number.
+SETTINGS > Vid Route Mode is settings key 1: `0` Analog In, `1` HDMI In, `2` Dual
+In, `3` Standalone, `4` Auto, per the guide (`pyvmancer.const.ROUTE_MODES`). On
+`1.0.1` it read 4 under Auto and 1 under HDMI In.
 
 The route decides what the processor is fed, separately from the input `video
 status` reports. With the route found on Dual In, `video status` still read
@@ -406,11 +419,9 @@ high-resolution parameter write plus a program change plus a note pair measured
 
 ## Liveness waits
 
-Commands that keep the shell busy with device-side work are awaited with no
-deadline: `programs enumerate`, `program load` and the `fpga status` /
-`program info` polls that follow it, `program presets apply`, `fs hash`, `fs put`
-(handshake, payload and commit), and `settings export`/`import`/`reset`. Other
-commands keep the client's reply deadline (`timeout`, 5 s by default).
+Every command is awaited with no deadline, since the shell can block on work the
+device starts itself (above), not only on `programs enumerate`, `program load`,
+`fs hash` or `fs put`.
 
 A wait ends only on positive evidence:
 
@@ -431,6 +442,8 @@ on 'programs enumerate czartroniks' 8.9s, usb up`); the interval is a display
 cadence only. `ShellClient.stall` is an opt-in guard for unattended runs: when
 set, the wait fails with `StallError` once nothing observable (the command
 awaited, bytes or log lines received, the `fpga status` fields) has changed for
-that many seconds. It is off by default; `vmancer load --stall` sets it. Where
+that many seconds. It is off by default; `vmancer load`, `shell` and `watch` take
+`--stall`. An abandoned wait is followed by a sync barrier before the next
+command (protocol.md). Where
 sysfs cannot trace the transport to a Videomancer, presence reads as unknown and
 the wait relies on transport errors.

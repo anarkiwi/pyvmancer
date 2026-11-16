@@ -5,6 +5,8 @@ from contextlib import nullcontext
 
 import pytest
 
+from pyvmancer.const import ShellErrorCode
+
 from pyvmancer import cli
 from pyvmancer.ccmap import (
     assign_cc_map,
@@ -149,27 +151,29 @@ def test_verify_raises_on_any_change():
     assert not device.writes
 
 
-@pytest.mark.parametrize("payload", ['{"key":200}', '"x"', "true"])
-def test_settings_reply_without_an_integer_is_refused(payload):
-    """A ``settings get`` reply carrying no integer value is an error, not a guess."""
+@pytest.mark.parametrize(
+    "payload,match",
+    [
+        ('{"key":200}', "lacks fields value"),
+        ('"x"', "lacks fields value"),
+        ("130816", "lacks fields value"),
+        ('{"key":200,"value":"x"}', "is not an integer"),
+        ('{"key":200,"value":true}', "is not an integer"),
+    ],
+)
+def test_settings_reply_without_an_integer_is_refused(payload, match):
+    """A ``settings get`` reply that is not an object with an integer value is an error, not a guess."""
     device = FakeCcMap()
     device.get_setting = lambda key: payload
-    with pytest.raises(VmancerError, match="carries no integer value"):
+    with pytest.raises(VmancerError, match=match):
         read_cc_settings(device)
-
-
-def test_settings_accepts_a_bare_integer_reply():
-    """A bare number reply reads as the value."""
-    device = FakeCcMap()
-    device.get_setting = lambda key: str(encode_setting(key - 200))
-    assert read_cc_settings(device) == tuple(encode_setting(m) for m in range(PARAM_COUNT))
 
 
 @pytest.fixture(name="device")
 def device_fixture(monkeypatch):
     """A fake device behind ``vmancer``'s serial opener."""
     transport = FakeByteTransport()
-    monkeypatch.setattr(cli, "open_shell", lambda **_: ShellClient(transport, timeout=0.2))
+    monkeypatch.setattr(cli, "open_shell", lambda **_: ShellClient(transport))
     return transport
 
 
@@ -253,10 +257,10 @@ def test_control_change_sends_one_raw_cc(midi, midi_transport):
 def test_cli_load_assigns_the_cc_map(monkeypatch, capsys):
     """``vmancer load`` goes through the facade, so the map is assigned and logged."""
     transport = FakeByteTransport()
-    transport.on_error("programs authors", 1, "unknown command")
+    transport.on_error("programs authors", ShellErrorCode.UNKNOWN_COMMAND, "unknown command")
     transport.on("program info", json.dumps({"name": "Passthru", "parameters": []}))
     monkeypatch.setattr("pyvmancer.shell.time.sleep", lambda _: None)
-    device = Videomancer(midi=MidiController(FakeMidiTransport()), shell=ShellClient(transport, timeout=0.2))
+    device = Videomancer(midi=MidiController(FakeMidiTransport()), shell=ShellClient(transport))
     monkeypatch.setattr(cli.Videomancer, "open", lambda **_: device)
     assert cli.main(["load", "Passthru"]) == 0
     assert "cc-map: assigned P1..P12 -> CC0..11 (was: ok)" in capsys.readouterr().err

@@ -5,9 +5,10 @@ as a composite `16d0:14db` with six interfaces: CDC comm + CDC data (serial
 shell), USB audio control + MIDI streaming (USB MIDI), mass storage (microSD),
 and a vendor interface.
 
-Sources: the LZX user manual and modulation guide, plus the `help` output of a
-unit running firmware `1.0.0-rc.37`. Where the two disagree, the device wins and
-the difference is noted in [firmware-notes.md](firmware-notes.md).
+Sources: the [LZX Serial Port Guide](https://lzxindustries.net/instruments/videomancer/manual/serial-command-guide) (firmware `1.0.1`, `1.0.2` beta), which is the reference
+for the serial shell, the LZX user manual and modulation guide, and the device
+itself. What the guide leaves out or the device does differently is in
+[firmware-notes.md](firmware-notes.md).
 
 ## Parameters
 
@@ -127,17 +128,55 @@ transport is playing.
 
 ## Serial shell
 
-Newline-terminated ASCII over USB CDC; the baud rate is ignored. Maximum 511
-bytes per command line.
+See the [LZX Serial Port Guide](https://lzxindustries.net/instruments/videomancer/manual/serial-command-guide) for the wire protocol and command reference. In short:
+newline-terminated ASCII over USB CDC, the baud rate ignored, 511 bytes per
+command line, replies of at most 1536 bytes (`programs list` and `fs ls` page).
 
-- `@<command>:<payload>` on success
+- `@<topic>:<payload>` on success, the topic naming the command family
 - `!<code>:<message>` on failure
-- unprefixed lines are log output
+- unprefixed lines are log or MIDI monitor output
+- `@program:invalidated:variant_mismatch` arrives unasked; `ShellClient` keeps it
+  in `unsolicited` and never takes it for a reply
 
-Firmware `1.0.0-rc.37` tags error codes as `0x58000000 | n`, so `1476395010` is
-code 2. `pyvmancer.shell.decode_error_code` strips the tag.
+Most commands answer one line; `cpu` answers one `@cpu:` line per core, which
+`ShellClient.replies` collects and `cpu()` merges.
 
-The shell is single-threaded and expects one connected terminal at a time.
+### Error codes
+
+A code is `domain << 26 | item`: domain 22 is the shell, 23 presets.
+`pyvmancer.const.ShellErrorCode` and `PresetErrorCode` hold the documented codes
+in full (`ShellErrorCode.PARSE_ERROR == 1476395010`), so a presets item is never
+mistaken for the shell item with the same number; `decode_error_code` and
+`ShellError.domain`/`.item` split one.
+
+### One command at a time
+
+The shell is single-threaded and serves one connection. `SerialTransport` opens
+the tty exclusively (`flock` and `TIOCEXCL`), raising `PortBusyError` when another
+process holds it, and drains stale input on open. `ShellClient` never sends a
+command while another is outstanding: every reply is awaited on liveness (see
+firmware-notes, "Liveness waits"), never a deadline. A wait that is abandoned (the
+opt-in stall guard, `KeyboardInterrupt`, a transport error, a spliced line) leaves
+the client unsynchronised, as does opening it. The next command first sends a sync
+barrier, `zz<nonce>`, an unknown command whose `unknown_command` error echoes the
+line; the shell answers in order, so anything still owed to an abandoned command
+arrives before that echo and is discarded (`ShellClient.discarded`).
+
+Replies are also checked for shape: `programs authors`, `programs enumerate`,
+`programs list` pages, `fpga status`, `settings get` and each `cpu` line must be
+JSON objects carrying their documented fields, or `ReplyShapeError` is raised
+rather than a default read.
+
+### Settings keys
+
+`pyvmancer.const.SettingKey`, `SETTING_NAMES` and `SETTING_VALUES` carry the
+guide's Setting Keys table (1 Video Route Mode, 8 Preferred Timing, 9 boot count,
+19 program author, ...), `TIMING_CODES` the Preferred Timing codes (the FPGA's
+4-bit timing value, not a list position), `modulator_key(channel, field)` the
+100-159 block (`100 + channel * 5 + field`) and `CC_MAP_SETTING_KEY` the 200-211
+MIDI Assign block, packed as bits 0-7 CC, 8-15 LSB CC (255 none) and 16
+auto-pair. `setting_name` and `describe_setting` render a key and value with
+those names; `vmancer watch` uses them. Writing key 7 loads a program.
 
 ### Command set
 
@@ -206,8 +245,8 @@ what `pyvmancer.shell.decoded_limit` computes.
 
 `fs caps` also advertises `fs_hash: 1`, for `fs hash <path>` →
 `{"hash": "<sha256 hex>", "size": n}`, computed on the device at roughly 79 kB/s
-— slow enough that a program binary needs a size-derived timeout, which
-`ShellClient.hash_file` supplies. See [firmware-notes.md](firmware-notes.md).
+— slow enough that `ShellClient.hash_file`, like every command, awaits it on
+liveness. See [firmware-notes.md](firmware-notes.md).
 
 `fs write` carries base64 too, and the whole command line is capped at 511
 bytes, so a chunk must leave room for the path and offset beside its payload.
@@ -228,17 +267,16 @@ those entries have no description available from any source.
 
 ### Program authors
 
-Firmware `1.0.2-rc.5` lists and loads one author's programs at a time.
+The device indexes one author at a time, the one selected in the program picker.
 `programs authors` returns `{"count","authors":[...]}`; `programs enumerate
 <author>` switches the active author and rebuilds the list, replying
-`{"author","skipped","count","before","overflow","active_author"}`. Large
-authors take longer than the default reply deadline, so `ShellClient` awaits that
-reply on liveness (see firmware-notes, "Liveness waits"). `programs list` and `program load`
-act on the active author. `ShellClient.programs()` visits every author (`lzx`
+`{"author","skipped","count","before","overflow","active_author"}` after scanning
+every program header in the folder. `programs list` acts on the active author;
+from `1.0.1` `program load` searches every author and switches the picker. `ShellClient.programs()` visits every author (`lzx`
 first, then the rest sorted) and qualifies non-`lzx` names as `author/Name`, since
 the same name can exist under two authors; `load_program` accepts the same form.
 Firmware without `programs authors` is listed and loaded as a single set; only
-an unknown-command or usage error (codes 1 and 2) means that, and any other
+an `unknown_command` or `parse_error` means that, and any other
 failure of `programs authors` raises rather than listing the active author alone.
 
 Every listing enumerates its author and checks the names against the reply:

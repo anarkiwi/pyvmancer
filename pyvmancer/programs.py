@@ -6,6 +6,7 @@ built-ins are absent from it, so ``programs list`` is normally longer and
 """
 
 import json
+from collections import Counter
 
 #: Where the device records its installed program library.
 MANIFEST_PATH = "sd:/programs/manifest.json"
@@ -94,3 +95,28 @@ class ProgramManifest:
 
     def __repr__(self):
         return f"ProgramManifest(version={self.version!r}, programs={len(self.entries)})"
+
+
+def listing_problems(author, enumerated, names, active=None):
+    """What is wrong with ``names`` as ``author``'s listing; empty when it is consistent.
+
+    ``enumerated`` is the ``programs enumerate`` reply, whose ``author`` and ``count`` it must match;
+    ``active`` is the device's active author once listed, None when unreported. Names must be
+    unique and carry no ``/``, which would read as an author qualifier.
+    """
+    problems = []
+    answered = enumerated.get("author", author)
+    if answered != author:
+        problems.append(f"enumerate answered for {answered!r}")
+    if active is not None and active != author:
+        problems.append(f"the device's active author is {active!r}")
+    count = enumerated.get("count")
+    if isinstance(count, int) and len(names) != count:
+        problems.append(f"listed {len(names)} names against an enumerated count of {count}")
+    repeated = sorted(name for name, seen in Counter(names).items() if seen > 1)
+    if repeated:
+        problems.append(f"repeated {repeated}")
+    slashed = [name for name in names if "/" in name]
+    if slashed:
+        problems.append(f"names with a '/' {slashed}")
+    return "; ".join(problems)

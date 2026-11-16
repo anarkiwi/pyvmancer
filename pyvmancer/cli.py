@@ -22,6 +22,7 @@ from .discovery import find_devices
 from .errors import VmancerError
 from .latency import DEFAULT_RATES, measure_latency, probe_cc_map
 from .route import parse_route
+from .statewatch import StateWatch
 
 
 def _param_value(text):
@@ -57,6 +58,23 @@ def _print_json(data):
     print(json.dumps(data, indent=2, default=str))
 
 
+def _add_stall(parser):
+    """The opt-in ``--stall`` guard on device waits."""
+    parser.add_argument(
+        "--stall",
+        type=float,
+        help="opt-in: fail once nothing observable changes for this many seconds (default: wait on USB)",
+    )
+
+
+def _add_watch(sub):
+    """The read-only ``watch`` subcommand."""
+    watcher = sub.add_parser("watch", help="poll device state read-only and print every change it makes")
+    watcher.add_argument("--seconds", type=float, default=60.0, help="how long to watch (default: 60)")
+    watcher.add_argument("--interval", type=float, default=1.0, help="seconds between polls (default: 1)")
+    _add_stall(watcher)
+
+
 def build_parser():
     """Construct the argument parser."""
     parser = argparse.ArgumentParser(prog="vmancer", description=__doc__)
@@ -90,11 +108,7 @@ def build_parser():
 
     load = sub.add_parser("load", help="load an FPGA program by name or author/Name, then assign the CC map")
     load.add_argument("name")
-    load.add_argument(
-        "--stall",
-        type=float,
-        help="opt-in: fail once nothing observable changes for this many seconds (default: wait on USB)",
-    )
+    _add_stall(load)
 
     sub.add_parser("manifest", help="show the SD program manifest over serial")
     sub.add_parser("resync", help="bounce the video timing to recover the output")
@@ -109,7 +123,7 @@ def build_parser():
     doctor.add_argument(
         "--route",
         type=parse_route,
-        help="fail unless Vid Route Mode reads this settings value or observed mode: "
+        help="fail unless Vid Route Mode (settings key 1) reads this value or mode: "
         + ", ".join(f"{v} or {n.lower().replace(' ', '-')}" for v, n in ROUTE_MODES.items())
         + " (default: report it)",
     )
@@ -130,9 +144,10 @@ def build_parser():
     cc_map.add_argument("--yes", action="store_true", help="actually --restore; otherwise this is a dry run")
 
     shell_cmd = sub.add_parser("shell", help="run a raw serial shell command")
-    shell_cmd.add_argument("--timeout", type=float, help="reply deadline in seconds (default: 5)")
+    _add_stall(shell_cmd)
     shell_cmd.add_argument("words", nargs="+")
 
+    _add_watch(sub)
     _add_video(sub)
 
     _add_firmware(sub)
@@ -234,8 +249,9 @@ def _run_midi(args):
 
 def _run_shell(args):
     """Handle subcommands that need the serial link."""
-    with open_shell(serial_number=args.serial_number) as shell:
-        shell.report = _note
+    with open_shell(
+        serial_number=args.serial_number, report=_note, stall=getattr(args, "stall", None)
+    ) as shell:
         if args.command == "status":
             _print_json(shell.status())
         elif args.command == "programs":
@@ -252,7 +268,7 @@ def _run_shell(args):
         elif args.command == "hash":
             _print_json(shell.hash_file(args.path))
         elif args.command == "shell":
-            print(shell.command(*args.words, timeout=args.timeout).payload)
+            print(shell.command(*args.words).payload)
         elif args.command == "video":
             return _run_video(args, shell)
     return 0
@@ -467,6 +483,14 @@ def _run_devices(_args):
     return 0
 
 
+def _run_watch(args):
+    """Handle ``watch``: poll state read-only, one command at a time, printing each change."""
+    watcher = StateWatch(lambda: open_shell(serial_number=args.serial_number, report=_note, stall=args.stall))
+    watcher.run(args.seconds, args.interval)
+    _note(f"{watcher.changed} changes, {watcher.reboots} reboots")
+    return 0
+
+
 def _run_operators(_args):
     """List the modulation operators and their ids."""
     _print_json(
@@ -496,6 +520,7 @@ HANDLERS = {
     "clock": _run_midi,
     "cc-map": _run_cc_map,
     "load": _run_load,
+    "watch": _run_watch,
     "doctor": _run_device,
     "latency": _run_device,
 }
