@@ -172,3 +172,18 @@ def test_device_info_repr():
     info = DeviceInfo(serial_number="VM1", bus=1, address=2)
     info.rawmidi = "/dev/snd/midiC1D0"
     assert repr(info) == ("DeviceInfo(serial='VM1', rawmidi='/dev/snd/midiC1D0', tty=None, usb=1:2)")
+
+
+def test_attached_matches_the_bus_address_of_a_videomancer(sysfs):
+    """Only a Videomancer at the opened bus address counts; another device there, or a new address, does not."""
+    _make_device(sysfs)
+    _make_device(sysfs, name="2-1", vid=0x1234, bus=3, address=7)
+    assert discovery.attached(3, 42) is True
+    assert discovery.attached(3, 43) is False
+    assert discovery.attached(3, 7) is False
+
+
+def test_attached_is_unknown_without_sysfs(monkeypatch, tmp_path):
+    """Presence cannot be read where sysfs is absent, which is not the same as gone."""
+    monkeypatch.setattr(discovery, "_SYSFS_USB", str(tmp_path / "absent"))
+    assert discovery.attached(3, 42) is None

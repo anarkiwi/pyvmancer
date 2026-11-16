@@ -43,19 +43,22 @@ from .diagnose import (
     diagnose_midi,
     diagnose_video,
 )
-from .discovery import DeviceInfo, find_device, find_devices
+from .discovery import DeviceInfo, attached, find_device, find_devices
 from .errors import (
+    DeviceGoneError,
     DeviceNotFoundError,
     FirmwareError,
     ProgramLoadError,
     ShellError,
     ShellTimeoutError,
+    StallError,
     TransportError,
     TransportUnavailableError,
     VideoTimingIgnored,
     CcMapError,
     VmancerError,
 )
+from .liveness import Watch
 from .firmware import (
     FIRMWARE_PRODUCT,
     FIRMWARE_REPO,
@@ -92,6 +95,7 @@ __all__ = [
     "CcMapReport",
     "CcProbeReport",
     "DeviceInfo",
+    "DeviceGoneError",
     "DeviceNotFoundError",
     "EMBEDDED_PROGRAMS",
     "FIRMWARE_PRODUCT",
@@ -126,6 +130,7 @@ __all__ = [
     "ShellClient",
     "ShellError",
     "ShellTimeoutError",
+    "StallError",
     "TransportError",
     "TransportState",
     "TransportUnavailableError",
@@ -134,6 +139,7 @@ __all__ = [
     "VideoTimingIgnored",
     "Videomancer",
     "VmancerError",
+    "Watch",
     "__version__",
     "assign_cc_map",
     "cc_map_report",
@@ -147,6 +153,7 @@ __all__ = [
     "download_library",
     "encode_preset",
     "expected_cc_map",
+    "attached",
     "find_device",
     "find_devices",
     "frame_period",

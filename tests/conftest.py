@@ -135,6 +135,12 @@ class FakeByteTransport(ByteTransport):
         self.cc = FakeCcMap()
         self.loaded = None
         self.queued = {}
+        self.holds = {}
+        self._held = None
+        self.reads = 0
+        self.presence = []
+        self.attached = True
+        self.tick = None
 
     def on(self, command, payload, tag=None):
         """Script an ``@tag:payload`` reply for an exact command line."""
@@ -161,6 +167,15 @@ class FakeByteTransport(ByteTransport):
         status = {"state": state, "configured": configured, "program": program or self.loaded}
         return reply_line("fpga", json.dumps(status))
 
+    def hold(self, command, reads):
+        """Withhold the reply to the next send of ``command`` for ``reads`` reads, as a busy shell does."""
+        self.holds[command] = reads
+        return self
+
+    def present(self):
+        """Scripted USB presence: the next ``presence`` entry, then ``attached``."""
+        return self.presence.pop(0) if self.presence else self.attached
+
     def silence(self, command):
         """Script no response at all for a command line."""
         self.scripts[command] = []
@@ -172,7 +187,10 @@ class FakeByteTransport(ByteTransport):
         self.raw.extend(data)
         for line in text.split("\n")[:-1]:
             self.written.append(line)
-            self._pending.extend(self._response(line))
+            if line in self.holds:
+                self._held = [self.holds.pop(line), self._response(line)]
+            else:
+                self._pending.extend(self._response(line))
 
     def _response(self, command):
         """Return the encoded reply lines for one command."""
@@ -197,7 +215,15 @@ class FakeByteTransport(ByteTransport):
         return "".join(f"{line}\n" for line in lines).encode("ascii")
 
     def read(self, timeout=0.0):
-        """Return and clear whatever replies are queued."""
+        """Return and clear whatever replies are queued, releasing a held reply once its reads are spent."""
+        self.reads += 1
+        if self.tick is not None:
+            self.tick()
+        if self._held is not None:
+            self._held[0] -= 1
+            if self._held[0] < 0:
+                self._pending.extend(self._held[1])
+                self._held = None
         data = bytes(self._pending)
         self._pending.clear()
         return data

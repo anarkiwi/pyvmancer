@@ -78,6 +78,7 @@ vmancer programs                # all programs; non-lzx names are author/Name
 vmancer programs --author lzx   # one author's programs, plain names
 vmancer load Isotherm           # load an lzx program
 vmancer load czartroniks/Teletext   # load another author's program
+vmancer load Passthru --stall 300   # loads wait while the device is on USB; opt-in stall guard
 vmancer manifest                # SD program library metadata
 vmancer hash sd:/programs/x.vmprog
 vmancer resync                  # recover an output that stopped passing frames
@@ -92,7 +93,7 @@ vmancer video timings           # timing standards the firmware accepts
 vmancer video timing 1080p30    # set the output timing and confirm it took
 vmancer video input hdmi        # select the video input
 vmancer shell modulation status # run any raw shell command
-vmancer shell --timeout 30 program load Passthru   # longer reply deadline
+vmancer shell --timeout 30 fs ls sd:/   # longer reply deadline for a raw command
 ```
 
 ## Firmware upgrade

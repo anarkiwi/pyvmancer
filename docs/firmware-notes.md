@@ -45,16 +45,23 @@ does not wrap `settings export`; use `settings get <key_id>` for individual keys
 - **`video timing` usage names no standards.** A bare `video timing` answers
   `[1] video timing`, so `video_timings()` is empty and `resync` needs an explicit
   `alternate`.
-- **`program load` can exceed the 5 s shell timeout** while still succeeding; use
-  `vmancer shell --timeout`.
+- **The shell blocks during device-side work and answers nothing meanwhile.** On
+  `1.0.1`, traced with `fpga status` polled every 100 ms: `programs enumerate lzx`
+  took about 6 s and `programs enumerate czartroniks` about 10.7 s; `program load`
+  answered within about 1 s once its author was active, and 0.02 s between two lzx
+  programs. A raw `program load Fray` with lzx active answered only after 11.4 s,
+  with queued polls unanswered and no log output, while the device stayed on USB.
+  The FPGA can then report `state idle, configured true, program ''` or keep
+  running the previous program before reaching the new one, and one `fpga status`
+  poll can itself go unanswered while it configures. None of this is a fault, so
+  these commands are awaited on liveness (below), not a deadline. A fixed deadline
+  (20 s in one client) once failed a Passthru load that completed on its own.
 - **`program load` is asynchronous.** Its `ok` can arrive before the FPGA
   reconfiguration completes, so an immediate `program info` answers `[3] no program
   loaded`. Seen when an archive run loaded Passthru twice in succession: the second
   load's `program info` failed, while the device ran Passthru normally moments later. `fpga status` reports `state`,
   `configured` and `program`; `ShellClient.load_program` polls it until the requested
-  program is `running` and `configured` and `program info` answers, bounded by the
-  shell's reply deadline, and raises `ProgramLoadError` naming the last status
-  otherwise. Preset recalls (`Videomancer.apply_preset`, `select_preset`) wait the same
+  program is `running` and `configured` and `program info` answers. Preset recalls (`Videomancer.apply_preset`, `select_preset`) wait the same
   way before the CC map is assigned.
 - **`settings export` and `fs read` keep the USB link up**, unlike `rc.37` below.
   Settings keys are numeric only.
@@ -167,12 +174,11 @@ shell client's 5.0s default timeout:
 
 Program binaries run 320-440 kB, so most exceed a 5-second deadline and the
 largest exceed it every time; only the small manifest fits.
-`ShellClient.hash_file` therefore derives its timeout from the size `fs stat`
-reports, at `HASH_BYTES_PER_SECOND` with `HASH_TIMEOUT_FACTOR` of headroom for a
-slower card, and still accepts an explicit `timeout=`.
+`ShellClient.hash_file` therefore awaits the reply on liveness rather than a deadline.
 
 Commands whose payload is chunked need none of this: `fs read` and `fs write`
-each carry at most a few hundred bytes, so they finish well inside the default.
+each carry at most a few hundred bytes, so they finish well inside the default
+reply deadline.
 
 ## `fs put` is the only usable upload path, and it owns the link
 
@@ -191,8 +197,10 @@ things make that easy to trigger, both fixed in `pyvmancer`:
 
 - **The device stalls while committing to the card**, past pyserial's old 2.0s
   `write_timeout`, when a program-sized payload lands in a directory that already
-  holds the library. Root-directory puts never stalled. The transports now allow
-  `serial_tty.WRITE_TIMEOUT` (30s) for a blocked write.
+  holds the library. Root-directory puts never stalled. The tty transport now waits
+  on a write that cannot progress for as long as the device stays on USB; the
+  libusb transport keeps a 30 s bulk write bound, because pyusb reports no byte
+  count for a timed-out write and it cannot be resumed.
 - **Sustained puts can drop the USB link.** One run re-enumerated after about
   7 MB, surfacing as `EIO`. The unit recovers on its own, so
   `library.install_library` reconnects and resumes; a later full run of the same
@@ -370,3 +378,34 @@ selected by tag prefix and ordered by semver precedence, which is also what keep
 library because the ALSA sequencer applies running-status compression. A
 high-resolution parameter write plus a program change plus a note pair measured
 21 bytes rather than 26.
+
+## Liveness waits
+
+Commands that keep the shell busy with device-side work are awaited with no
+deadline: `programs enumerate`, `program load` and the `fpga status` /
+`program info` polls that follow it, `program presets apply`, `fs hash`, `fs put`
+(handshake, payload and commit), and `settings export`/`import`/`reset`. Other
+commands keep the client's reply deadline (`timeout`, 5 s by default).
+
+A wait ends only on positive evidence:
+
+- the reply: `ok` (or the command's own payload) completes it, and an error
+  reply is raised as `ShellError` with the device's message;
+- the device leaving USB: the bus address the transport opened is read from
+  sysfs on every quiet poll, and its absence raises `DeviceGoneError` at once;
+- a transport error (`EIO` and the like) raises `TransportError`;
+- for a load, `ProgramLoadError` once `fpga status` has moved off the state first
+  seen after `program load` answered and then settles on a different program
+  running (the load landed on, or reverted to, the wrong program). A different
+  program running before anything has moved is the previous program still
+  loaded, and is waited on.
+
+While waiting, nothing else is sent. `ShellClient.report` receives a line every
+`report_interval` seconds (`still loading czartroniks/Fray after 9.1s: shell busy
+on 'programs enumerate czartroniks' 8.9s, usb up`); the interval is a display
+cadence only. `ShellClient.stall` is an opt-in guard for unattended runs: when
+set, the wait fails with `StallError` once nothing observable (the command
+awaited, bytes or log lines received, the `fpga status` fields) has changed for
+that many seconds. It is off by default; `vmancer load --stall` sets it. Where
+sysfs cannot trace the transport to a Videomancer, presence reads as unknown and
+the wait relies on transport errors.

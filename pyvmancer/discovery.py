@@ -94,6 +94,15 @@ def _block_for(usb_path):
     return None
 
 
+def _entries(vid=USB_VID, pid=USB_PID):
+    """Sysfs USB device directories whose VID:PID match."""
+    for entry in sorted(glob.glob(os.path.join(_SYSFS_USB, "*"))):
+        vendor = _read(os.path.join(entry, "idVendor"))
+        product = _read(os.path.join(entry, "idProduct"))
+        if vendor is not None and product is not None and (int(vendor, 16), int(product, 16)) == (vid, pid):
+            yield entry
+
+
 def find_devices(vid=USB_VID, pid=USB_PID):
     """Enumerate attached Videomancers by scanning sysfs.
 
@@ -101,13 +110,7 @@ def find_devices(vid=USB_VID, pid=USB_PID):
     directly there.
     """
     found = []
-    for entry in sorted(glob.glob(os.path.join(_SYSFS_USB, "*"))):
-        vendor = _read(os.path.join(entry, "idVendor"))
-        product = _read(os.path.join(entry, "idProduct"))
-        if vendor is None or product is None:
-            continue
-        if int(vendor, 16) != vid or int(product, 16) != pid:
-            continue
+    for entry in _entries(vid, pid):
         info = DeviceInfo(
             serial_number=_read(os.path.join(entry, "serial")),
             usb_path=entry,
@@ -119,6 +122,21 @@ def find_devices(vid=USB_VID, pid=USB_PID):
         info.block = _block_for(entry)
         found.append(info)
     return found
+
+
+def attached(bus, address, vid=USB_VID, pid=USB_PID):
+    """Whether a Videomancer is still enumerated at ``bus``/``address``; None where sysfs is absent.
+
+    A device that re-enumerates takes a new address, so it no longer counts as
+    the one that was opened.
+    """
+    if not os.path.isdir(_SYSFS_USB):
+        return None
+    where = (bus, address)
+    return any(
+        (_int(os.path.join(e, "busnum")), _int(os.path.join(e, "devnum"))) == where
+        for e in _entries(vid, pid)
+    )
 
 
 def find_device(serial_number=None, vid=USB_VID, pid=USB_PID):

@@ -13,8 +13,9 @@ import types
 
 import pytest
 
-from pyvmancer.errors import DeviceNotFoundError, TransportError, TransportUnavailableError
-from pyvmancer.transports import rawmidi, usb_cdc
+from pyvmancer.discovery import DeviceInfo
+from pyvmancer.errors import DeviceGoneError, DeviceNotFoundError, TransportError, TransportUnavailableError
+from pyvmancer.transports import rawmidi, serial_tty, usb_cdc
 from pyvmancer.transports.mido_port import MidoTransport
 from pyvmancer.transports.rawmidi import RawMidiTransport
 from pyvmancer.transports.serial_tty import SerialTransport
@@ -168,32 +169,48 @@ def test_rawmidi_context_manager(fifo):
 
 
 class _FakeSerialPort:
-    """Minimal pyserial ``Serial`` stand-in backed by an in-memory buffer."""
+    """Minimal pyserial ``Serial`` stand-in: reads from a buffer, writes into a non-blocking pipe."""
 
-    def __init__(self, port, baudrate=115200, timeout=0, write_timeout=None):
+    def __init__(self, port, baudrate=115200, timeout=0):
         self.port = port
         self.baudrate = baudrate
         self.timeout = timeout
-        self.write_timeout = write_timeout
-        self.written = bytearray()
+        self.sink, self.fd = os.pipe()
+        os.set_blocking(self.fd, False)
         self.buffer = bytearray()
         self.closed = False
         self.fail = None
+
+    def fileno(self):
+        """The pipe's write end, standing in for the tty descriptor."""
+        if self.fail:
+            raise OSError(self.fail)
+        return self.fd
+
+    @property
+    def written(self):
+        """Everything written so far, drained from the pipe."""
+        out = bytearray()
+        os.set_blocking(self.sink, False)
+        try:
+            while chunk := os.read(self.sink, 1 << 16):
+                out.extend(chunk)
+        except BlockingIOError:
+            pass
+        return bytes(out)
+
+    def fill(self):
+        """Fill the pipe so the next write cannot progress, as a device that stops draining."""
+        try:
+            while True:
+                os.write(self.fd, bytes(1 << 12))
+        except BlockingIOError:
+            pass
 
     @property
     def in_waiting(self):
         """Bytes still queued for reading."""
         return len(self.buffer)
-
-    def write(self, data):
-        """Record outgoing bytes."""
-        if self.fail:
-            raise OSError(self.fail)
-        self.written.extend(data)
-        return len(data)
-
-    def flush(self):
-        """No-op flush."""
 
     def read(self, size=1):
         """Pop up to ``size`` buffered bytes."""
@@ -240,6 +257,54 @@ def test_serial_transport_write_and_read(serial_port):
     port.buffer.extend(b"@version:1.0\n")
     assert transport.read(timeout=0.1) == b"@version:1.0\n"
     assert port.timeout == pytest.approx(0.1)
+
+
+def test_serial_transport_write_waits_while_the_device_is_attached(serial_port, monkeypatch):
+    """A port that stops draining is waited on for as long as sysfs shows the device."""
+    transport = SerialTransport("/dev/ttyFAKE")
+    port = serial_port[0]
+    port.fill()
+    checks = []
+
+    def present():
+        """Attached; the device drains the link once asked twice."""
+        checks.append(True)
+        if len(checks) == 2:
+            assert port.written
+        return True
+
+    monkeypatch.setattr(transport, "present", present)
+    monkeypatch.setattr(serial_tty, "POLL_S", 0.01)
+    transport.write(b"fs put payload")
+    assert len(checks) == 2 and port.written == b"fs put payload"
+
+
+def test_serial_transport_write_fails_once_the_device_leaves_usb(serial_port, monkeypatch):
+    """A stalled write ends only when the device is gone from USB."""
+    transport = SerialTransport("/dev/ttyFAKE")
+    serial_port[0].fill()
+    monkeypatch.setattr(transport, "present", lambda: False)
+    monkeypatch.setattr(serial_tty, "POLL_S", 0.01)
+    with pytest.raises(DeviceGoneError, match="writing to /dev/ttyFAKE.*3 bytes unsent"):
+        transport.write(b"abc")
+
+
+def test_serial_transport_presence_follows_the_device_that_opened(serial_port, monkeypatch):
+    """The tty is traced to its device's bus address at open, and that address is what is checked."""
+    info = DeviceInfo(bus=3, address=42)
+    info.tty = "/dev/ttyACM0"
+    monkeypatch.setattr(serial_tty, "find_devices", lambda: [info])
+    monkeypatch.setattr(serial_tty.os.path, "realpath", lambda path: "/dev/ttyACM0")
+    seen = []
+    monkeypatch.setattr(serial_tty, "attached", lambda *where: seen.append(where) or True)
+    assert SerialTransport("/dev/serial/by-id/vm").present() is True
+    assert seen == [(3, 42)]
+
+
+def test_serial_transport_presence_is_unknown_for_an_untraced_tty(serial_port, monkeypatch):
+    """A tty sysfs cannot trace to a Videomancer gives no presence verdict, never a false one."""
+    monkeypatch.setattr(serial_tty, "find_devices", lambda: [])
+    assert SerialTransport("/dev/ttyFAKE").present() is None
 
 
 def test_serial_transport_read_empty(serial_port):
@@ -615,6 +680,16 @@ def test_usb_cdc_read_raises_on_fatal_error(monkeypatch):
     in_ep.fail = core.USBError("broken pipe", errno=32)
     with pytest.raises(TransportError, match="USB bulk read failed"):
         transport.read(timeout=0.01)
+
+
+def test_usb_cdc_presence_follows_its_bus_address(monkeypatch):
+    """The claimed device's bus and address are what sysfs is asked about."""
+    device, _, _ = _cdc_device()
+    _install_usb(monkeypatch, device)
+    seen = []
+    monkeypatch.setattr(usb_cdc, "attached", lambda *where: seen.append(where) or False)
+    assert UsbCdcTransport().present() is False
+    assert seen == [(3, 42)]
 
 
 def test_usb_cdc_write_error(monkeypatch):

@@ -5,6 +5,44 @@ All notable changes to this project are documented here. The format follows
 [semantic](https://semver.org/), with the 0.x caveat that the public API may
 still move between minor releases.
 
+## [0.6.3] - 2026-11-16
+
+Patch: device-side work is awaited on liveness, not a deadline. The shell answers
+nothing while it enumerates an author or reads a program from the card, for
+longer than any fixed reply deadline is safe to assume, so a wait now ends only
+on the reply, an error reply, a transport error, or the device leaving USB.
+
+### Added
+
+- `pyvmancer.liveness.Watch`: progress reports at a display cadence, USB presence
+  on every quiet poll, and an opt-in stall guard.
+- `ShellClient.report`, `report_interval` and `stall` (off by default);
+  `ShellClient.watch(what)`; `command(..., watch=...)` awaits a reply with no
+  deadline.
+- `ByteTransport.present()`; the tty and libusb transports read it from sysfs by
+  the bus address they opened. `discovery.attached(bus, address)`.
+- `DeviceGoneError` (a `TransportError`) and `StallError`.
+- `ShellClient.export_settings()`; `shell.fpga_key(status)`.
+- `vmancer load --stall SECONDS`; the CLI prints progress lines on stderr.
+
+### Changed
+
+- `load_program` and `wait_loaded` wait on liveness. `wait_loaded(program=None,
+  watch=None, sleep=None)` drops `timeout` and `clock`; `ProgramLoadError` is
+  raised only when `fpga status`, having moved off its first state, settles on a
+  different program running. It takes an optional `reason`.
+- `programs enumerate`, `program presets apply`, `fs hash`, `fs put` and
+  `settings export`/`import`/`reset` wait on liveness. `hash_file` and `put_file`
+  drop `timeout=`.
+- The tty transport waits on a write that cannot progress for as long as the
+  device stays on USB; its 30 s write deadline and `write_timeout` argument are gone.
+
+### Removed
+
+- `ENUMERATE_TIMEOUT`, `HASH_BYTES_PER_SECOND`, `HASH_TIMEOUT_FACTOR`,
+  `PUT_BYTES_PER_SECOND`, `PUT_TIMEOUT_FACTOR`, `ShellClient.hash_timeout`,
+  `ShellClient.put_timeout`, `serial_tty.WRITE_TIMEOUT`.
+
 ## [0.6.2] - 2026-11-16
 
 Patch: a load waits until the device runs the program, because `program load`

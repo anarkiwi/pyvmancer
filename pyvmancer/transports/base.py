@@ -42,6 +42,10 @@ class ByteTransport(abc.ABC):
     def read(self, timeout=0.0):
         """Read available bytes, waiting up to ``timeout`` seconds."""
 
+    def present(self):
+        """True while the device behind this transport is enumerated, False once gone, None if unknowable."""
+        return None
+
     @abc.abstractmethod
     def close(self):
         """Release the underlying resource."""

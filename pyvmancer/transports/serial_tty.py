@@ -1,17 +1,13 @@
-"""Shell transport over a CDC-ACM tty (``/dev/ttyACM*``, ``COM*``)."""
+"""Shell transport over a CDC-ACM tty (``/dev/ttyACM*``)."""
 
-from ..errors import TransportError, TransportUnavailableError
+import os
+import select
+from contextlib import suppress
+
+from ..discovery import attached, find_devices
+from ..errors import DeviceGoneError, TransportError, TransportUnavailableError
+from ..liveness import POLL_S
 from .base import ByteTransport
-
-#: Seconds to let a write block before giving up.
-#:
-#: The device stops draining the link while it commits a bulk transfer to the
-#: SD card, and those pauses run past two seconds when ``fs put`` streams a
-#: program-sized payload into a directory that already holds the whole library.
-#: Abandoning a write mid-payload strands the device consuming the link as file
-#: content, so this is generous on purpose; the shell's own reply deadlines are
-#: what bound a genuinely unresponsive device.
-WRITE_TIMEOUT = 30.0
 
 
 class SerialTransport(ByteTransport):
@@ -21,14 +17,16 @@ class SerialTransport(ByteTransport):
     because pyserial requires one.
     """
 
-    def __init__(self, port, baudrate=115200, write_timeout=WRITE_TIMEOUT):
+    def __init__(self, port, baudrate=115200):
         try:
             import serial
         except ImportError as err:
             raise TransportUnavailableError("pyserial is not installed") from err
         self._port_name = port
+        tty = os.path.realpath(port)
+        self._where = next(((d.bus, d.address) for d in find_devices() if d.tty == tty), None)
         try:
-            self._port = serial.Serial(port, baudrate=baudrate, timeout=0, write_timeout=write_timeout)
+            self._port = serial.Serial(port, baudrate=baudrate, timeout=0)
         except Exception as err:
             raise TransportUnavailableError(f"cannot open {port}: {err}") from err
 
@@ -37,13 +35,35 @@ class SerialTransport(ByteTransport):
         """Name of the underlying serial port."""
         return self._port_name
 
+    def present(self):
+        """Whether the device that exposed this tty when it opened is still enumerated, from sysfs.
+
+        None when the tty could not be traced to a Videomancer at open, since
+        presence then cannot be read.
+        """
+        return None if self._where is None else attached(*self._where)
+
     def write(self, data):
-        """Write bytes to the port."""
+        """Write every byte, waiting on the port for as long as the device stays enumerated.
+
+        The device stops draining the link while it commits a bulk transfer to
+        the card, and abandoning a write mid-payload strands it consuming the
+        link as file content, so a write that cannot progress is waited on
+        rather than timed out; only the device leaving USB ends it.
+        """
         if self._port is None:
             raise TransportError("transport is closed")
+        view = memoryview(bytes(data))
         try:
-            self._port.write(bytes(data))
-            self._port.flush()
+            fd = self._port.fileno()
+            while view:
+                if select.select([], [fd], [], POLL_S)[1]:
+                    with suppress(BlockingIOError):
+                        view = view[os.write(fd, view) :]
+                elif self.present() is False:
+                    raise DeviceGoneError(f"writing to {self._port_name}", f"{len(view)} bytes unsent")
+        except DeviceGoneError:
+            raise
         except Exception as err:
             raise TransportError(f"write to {self._port_name} failed: {err}") from err
 
