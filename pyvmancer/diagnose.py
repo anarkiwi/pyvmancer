@@ -8,8 +8,12 @@ manufactures a fault. ``hdmi.connected`` is advisory and never checked. :func:`d
 
 from typing import Iterable, NamedTuple
 
-from .latency import LatencyReport, measure_latency
+from .ccmap import CcMapReport, cc_map_report, expected_cc_map
+from .latency import CcProbeReport, LatencyReport, measure_latency
 from .video import VideoStatus
+
+#: The CLI command that restores the default CC map.
+RESTORE_COMMAND = "vmancer cc-map --restore --yes"
 
 
 class Finding(NamedTuple):
@@ -115,8 +119,52 @@ def diagnose_video(status: VideoStatus) -> list[Finding]:
     return [finding for finding in findings if finding is not None]
 
 
-def diagnose(shell) -> list[Finding]:
-    """Run every device check over an open :class:`~pyvmancer.shell.ShellClient`."""
+def _cc(slot):
+    """``msb/lsb`` of a slot, ``-`` for an LSB that is not sent."""
+    return f"{slot[0]}/{'-' if slot[1] is None else slot[1]}"
+
+
+def cc_map_fix(cc_map: CcMapReport) -> str:
+    """How to reassign ``cc_map``'s expected map; the CLI command covers the default one."""
+    if cc_map.expected == expected_cc_map():
+        return f"run `{RESTORE_COMMAND}`, which writes every slot's CC and reads the map back"
+    return "call `pyvmancer.assign_cc_map(shell, midi)` with the controller that drives the device"
+
+
+def diagnose_cc_map(cc_map: CcMapReport) -> Finding:
+    """``midi.cc_map``: every slot listens on the CC pyvmancer sends it, and no CC drives two slots."""
+    problems = [
+        f"P{p} on {_cc(cc_map.actual[p - 1])}, want {_cc(cc_map.expected[p - 1])}" for p in cc_map.mismatched
+    ]
+    groups = sorted({(p, *o) for p, o in cc_map.shared.items() if p < min(o)})
+    problems += [f"P{', P'.join(map(str, g))} share a CC" for g in groups]
+    problems += [f"P{p} unassigned" for p in cc_map.unassigned]
+    detail = "; ".join(problems) or (
+        f"P1..P{len(cc_map.expected)} on msb/lsb " + " ".join(_cc(slot) for slot in cc_map.expected)
+    )
+    return _finding("midi.cc_map", cc_map.ok, detail, cc_map_fix(cc_map))
+
+
+def diagnose_cc_probe(probe: CcProbeReport) -> Finding:
+    """``midi.cc_probe``: writing one slot's CC over MIDI moved that slot and nothing else."""
+    wrong = [
+        f"P{p} CC moved {', '.join(f'P{m}' for m in moved) or 'nothing'}"
+        for p, moved in enumerate(probe.moved, start=1)
+        if moved != (p,)
+    ]
+    return _finding(
+        "midi.cc_probe",
+        probe.ok,
+        "; ".join(wrong) or f"each of P1..P{len(probe.moved)} moved only itself",
+        f"run `vmancer cc-map` to see the device map, then `{RESTORE_COMMAND}`",
+    )
+
+
+def diagnose(shell, midi=None) -> list[Finding]:
+    """Run every read-only device check over an open :class:`~pyvmancer.shell.ShellClient`.
+
+    ``midi`` is the :class:`~pyvmancer.midi.MidiController` whose CC map is expected; default CCs otherwise.
+    """
     findings = [Finding("firmware.version", True, shell.version().strip())]
     fpga = shell.fpga_status()
     if "state" in fpga:
@@ -129,6 +177,9 @@ def diagnose(shell) -> list[Finding]:
                 "no FPGA program is running; load one, e.g. `vmancer load Passthru`",
             )
         )
+    cc_map = cc_map_report(shell, midi)
+    if cc_map is not None:
+        findings.append(diagnose_cc_map(cc_map))
     return findings + diagnose_video(shell.video_state())
 
 

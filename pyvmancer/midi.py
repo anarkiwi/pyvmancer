@@ -26,6 +26,11 @@ from .const import (
 from .errors import VmancerError
 
 
+def lsb_partner(cc):
+    """The LSB controller paired with MSB ``cc``: ``cc + 32`` for MSB 0..31, else ``None``."""
+    return cc + CC_LSB_OFFSET if cc < CC_LSB_OFFSET else None
+
+
 def _check_param(param):
     """Validate and return a 1-based parameter number."""
     if not 1 <= param <= PARAM_COUNT:
@@ -87,7 +92,7 @@ class MidiController:
     def _conflicts(self, param, cc):
         """Yield ``(index, reason)`` for each parameter ``cc`` would clash with.
 
-        In high-resolution mode a controller also owns its LSB partner at
+        In high-resolution mode a controller 0..31 also owns its LSB partner at
         ``cc + 32``, so two parameters 32 apart would silently interfere.
         """
         for index, assigned in enumerate(self._cc_map):
@@ -98,9 +103,9 @@ class MidiController:
                 yield index, "is already assigned to"
             elif not self.high_resolution:
                 continue
-            elif assigned == cc + CC_LSB_OFFSET:
-                yield index, f"has LSB partner {cc + CC_LSB_OFFSET}, already assigned to"
-            elif assigned + CC_LSB_OFFSET == cc:
+            elif assigned == lsb_partner(cc):
+                yield index, f"has LSB partner {assigned}, already assigned to"
+            elif lsb_partner(assigned) == cc:
                 yield index, "is already the LSB partner of"
 
     @property
@@ -118,20 +123,17 @@ class MidiController:
     def resolution(self, param):
         """Bits actually used for ``param``: 14, or 7 when no LSB partner exists.
 
-        A controller above 95 has no ``cc + 32`` partner, so it degrades to
-        7-bit even in high-resolution mode.
+        Only MSB controllers 0..31 pair with an LSB, as the device itself reports.
         """
         _check_param(param)
-        if not self.high_resolution:
-            return 7
-        return 7 if int(self._cc_map[param - 1]) + CC_LSB_OFFSET > CC_MAX else 14
+        return 14 if self.high_resolution and lsb_partner(int(self._cc_map[param - 1])) else 7
 
     def _cc_messages(self, param, value):
         """Build the CC message(s) carrying ``value`` for ``param``."""
         channel = self._channel_index
         msb_cc = int(self._cc_map[param - 1])
-        lsb_cc = msb_cc + CC_LSB_OFFSET
-        if not self.high_resolution or lsb_cc > CC_MAX:
+        lsb_cc = lsb_partner(msb_cc)
+        if self.resolution(param) == 7:
             return [
                 mido.Message(
                     "control_change", channel=channel, control=msb_cc, value=int(scaling.to_midi7(value))
@@ -142,6 +144,15 @@ class MidiController:
             mido.Message("control_change", channel=channel, control=msb_cc, value=int(msb)),
             mido.Message("control_change", channel=channel, control=lsb_cc, value=int(lsb)),
         ]
+
+    def control_change(self, cc, value=0):
+        """Send one raw 7-bit control change, outside the parameter map."""
+        if not CC_MIN <= cc <= CC_MAX:
+            raise ValueError(f"cc must be {CC_MIN}..{CC_MAX}, got {cc}")
+        self._send(
+            mido.Message("control_change", channel=self._channel_index, control=int(cc), value=int(value))
+        )
+        return self
 
     def set_param(self, param, value):
         """Set one parameter.

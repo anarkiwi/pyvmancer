@@ -7,7 +7,7 @@ serial command guide. See ``docs/protocol.md`` for provenance of each table.
 from enum import Enum, IntEnum
 
 #: Package version. Lives here so leaf modules can read it without importing the package.
-VERSION = "0.6.0"
+VERSION = "0.6.1"
 
 USB_VID = 0x16D0
 USB_PID = 0x14DB
@@ -30,6 +30,16 @@ DEFAULT_CC_MSB = tuple(range(PARAM_COUNT))
 CC_LSB_OFFSET = 32
 CC_MIN = 0
 CC_MAX = 127
+#: Controllers the MIDI spec leaves undefined below the channel-mode range (120..127), preferred first.
+#: One is sent after a load so an armed MIDI Assign captures it instead of a CC that drives a slot.
+ASSIGN_SINK_CCS = tuple(range(119, 101, -1))
+#: Settings key holding P1's CC assignment; P2..P12 follow consecutively.
+CC_MAP_SETTING_KEY = 200
+#: A CC-map setting is ``CC_MAP_ASSIGNED | msb``, or ``CC_MAP_UNASSIGNED``, as observed on 1.0.1.
+CC_MAP_ASSIGNED = 0x1FF00
+CC_MAP_UNASSIGNED = 0x1FFFF
+#: Bits of a CC-map setting holding the MSB.
+CC_MSB_MASK = 0xFF
 
 #: MIDI notes 0..11 trigger modulators P1..P12.
 NOTE_BASE = 0

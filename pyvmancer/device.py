@@ -1,5 +1,6 @@
 """High-level Videomancer facade combining the MIDI and serial control paths."""
 
+import logging
 import time
 
 import numpy as np
@@ -17,12 +18,15 @@ from .const import (
     ParamRole,
     classify_param,
 )
+from .ccmap import assign_cc_map, reassert_cc_map, sink_cc, verify_cc_map
 from .discovery import find_device
 from .errors import DeviceNotFoundError, TransportUnavailableError, VmancerError
 from .midi import MidiController
 from .scaling import MIDI_7BIT_MAX
 from .shell import ShellClient
 from .transports.rawmidi import RawMidiTransport
+
+LOG = logging.getLogger(__name__)
 
 #: Readback slack for :meth:`Videomancer.park`: one 7-bit CC step in device units.
 PARK_TOLERANCE = PARAM_MAX // MIDI_7BIT_MAX
@@ -184,6 +188,9 @@ class Videomancer:
         self._shell = shell
         self.info = info
         self._parameters = None
+        self.program = None
+        self.cc_assignment = None
+        self.assign_events = []
 
     @classmethod
     def open(cls, serial_number=None, midi=True, shell=True, channel=None, high_resolution=True):
@@ -248,14 +255,60 @@ class Videomancer:
         return self.midi.trigger(param, velocity=velocity)
 
     def select_preset(self, program):
-        """Recall a preset by MIDI program change."""
-        return self.midi.select_preset(program)
+        """Recall a preset by MIDI program change, then assign the CC map when serial is open."""
+        self.midi.select_preset(program)
+        if self.has_shell:
+            self.consume_midi_assign()
+            self.assign_cc_map("preset")
+        return self
+
+    def apply_preset(self, index, bank=None):
+        """Apply a preset over serial, then assign the CC map."""
+        self.shell.apply_preset(index, bank)
+        self.consume_midi_assign()
+        return self.assign_cc_map("preset")
 
     def load_program(self, name, settle=1.5):
-        """Load an FPGA program by name or ``author/Name`` (serial only)."""
+        """Load a program by name or ``author/Name``, read its parameters, and assign the CC map."""
         result = self.shell.load_program(name, settle=settle)
-        self._parameters = None
+        self.program = name
+        self.consume_midi_assign()
+        self.parameters(refresh=True)
+        self.assign_cc_map("load")
         return result
+
+    def consume_midi_assign(self):
+        """Send the sink CC, so a MIDI Assign armed without a button press captures it, not a slot's CC."""
+        if self.has_midi:
+            self.midi.control_change(sink_cc(self._midi))
+
+    def _record(self, assignment, phase):
+        """Keep and log an assignment; an armed MIDI Assign also goes to :attr:`assign_events`."""
+        self.cc_assignment = assignment
+        LOG.info(assignment.summary())
+        if assignment.before.armed:
+            self.assign_events.append(
+                {
+                    "time": time.time(),
+                    "program": self.program,
+                    "phase": phase,
+                    "params": assignment.before.armed,
+                }
+            )
+        return assignment
+
+    def assign_cc_map(self, phase="assign"):
+        """Write the CCs the MIDI controller sends on to every slot and verify it."""
+        return self._record(assign_cc_map(self.shell, self._midi), phase)
+
+    def reassert_cc_map(self, phase="park"):
+        """Verify the map, reassigning only a sink-CC capture; any other change raises ``CcMapError``."""
+        assignment = reassert_cc_map(self.shell, self._midi)
+        return assignment if assignment is None else self._record(assignment, phase)
+
+    def verify_cc_map(self):
+        """Raise :class:`~pyvmancer.errors.CcMapError` unless the device map still matches the controller."""
+        return verify_cc_map(self.shell, self._midi)
 
     def parameters(self, refresh=False, sweep_steps=SWEEP_STEPS):
         """Named parameters of the loaded program, indexed by name (serial only).
@@ -312,7 +365,8 @@ class Videomancer:
 
         Writes are paced at ``rate_hz`` because an unpaced burst drops the LSB of
         14-bit CC pairs, and the readback settles first because serial and MIDI
-        are asynchronous. Returns the verified combined values.
+        are asynchronous. The sink CC goes first, and a capture of it is then reassigned;
+        any other CC-map change raises. Returns the verified combined values.
         """
         reference = scaling.clamp(values)
         if reference.shape != (PARAM_COUNT,):
@@ -320,6 +374,7 @@ class Videomancer:
         if rate_hz <= 0:
             raise ValueError(f"rate_hz must be positive, got {rate_hz}")
         pace = (2 if self.midi.high_resolution else 1) / rate_hz
+        self.consume_midi_assign()
         for index, value in enumerate(reference):
             self.midi.set_param(index + 1, 0)
             self.shell.set_modulation(index, int(value))
@@ -329,6 +384,7 @@ class Videomancer:
             sleep(settle)
             state = self.shell.combined_values()
             if np.all(np.abs(state - reference) <= tolerance):
+                self.reassert_cc_map()
                 return state
         raise VmancerError(f"parked values settled at {state.tolist()}, want {reference.tolist()}")
 

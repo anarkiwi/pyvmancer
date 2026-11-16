@@ -1,4 +1,4 @@
-"""MIDI CC write to serial readback latency, and whether paced writes build a backlog.
+"""MIDI CC write to serial readback latency, paced-write backlog, and per-slot CC addressing.
 
 A CC is an offset on the manual value, so each target is ``manual + offset`` and
 the prior offset, ``combined - manual``, is written back afterwards. Parameters
@@ -15,6 +15,8 @@ from .device import PARK_TOLERANCE
 from .errors import VmancerError
 from .video import frame_period
 
+#: Every parameter, as probed by :func:`probe_cc_map`.
+CC_PARAMS = tuple(range(1, PARAM_COUNT + 1))
 #: Rates tried by default, in parameter sets per second.
 DEFAULT_RATES = (5, 10, 20, 40, 80)
 
@@ -91,11 +93,13 @@ class LatencyReport(NamedTuple):
 
 
 class _Probe:
-    """Writes CC offsets to unmodulated parameters and times their readback convergence."""
+    """Writes CC offsets to unmodulated parameters and times their readback convergence.
 
-    def __init__(self, device, params, timeout, clock, sleep):
-        if any(param_kind(p) is ParamKind.TOGGLE for p in params):
-            raise ValueError(f"toggles cannot carry a ramp; choose knobs or the fader, got {list(params)}")
+    With ``floor`` the manual values are lowered to zero for full CC headroom, and
+    :meth:`restore` puts them back along with the prior offsets.
+    """
+
+    def __init__(self, device, params, timeout, clock, sleep, floor=False):
         self.device, self.timeout, self.clock, self.sleep = device, timeout, clock, sleep
         self.params = tuple(params)
         self.index = np.array(self.params) - 1
@@ -107,11 +111,21 @@ class _Probe:
             raise VmancerError(
                 f"P{list(params)} have modulation sources {sources.tolist()}; disable them first"
             )
-        self.manual = device.shell.manual_values(state)[self.index]
+        self.original = device.shell.manual_values(state)[self.index]
+        self.manual = np.zeros_like(self.original) if floor else self.original.copy()
         self.headroom = PARAM_MAX - self.manual
         if np.any(self.headroom <= 2 * PARK_TOLERANCE):
             raise VmancerError(f"manual values {self.manual.tolist()} leave no CC headroom; park first")
         self.prior = self.read()
+        self.offsets = np.clip(self.prior - self.original, 0, PARAM_MAX)
+        self.held = self.original
+        self._set_manual(self.manual)
+
+    def _set_manual(self, values):
+        """Write each probed slot's manual value where it differs from the one it holds."""
+        for index in np.flatnonzero(values != self.held):
+            self.device.shell.set_modulation(int(self.index[index]), int(values[index]))
+        self.held = values
 
     def read(self):
         """Combined values of the probed parameters, recording the round trip."""
@@ -166,8 +180,9 @@ class _Probe:
         return RateResult(float(rate), sets, sets * len(self.params) * self.per_param, sent - start, lag)
 
     def restore(self):
-        """Write back the prior offsets; True once the prior combined values read back."""
-        self.write(np.clip(self.prior - self.manual, 0, PARAM_MAX))
+        """Write back the prior offsets and manual values; True once the prior combined values read back."""
+        self.write(self.offsets)
+        self._set_manual(self.original)
         return self.converge(self.prior, self.clock()) is not None
 
 
@@ -189,6 +204,8 @@ def measure_latency(
     ramps for ``seconds`` then times a sentinel, ``None`` if not converged within
     ``timeout``, which also ends the sweep. Touched parameters are then restored.
     """
+    if any(param_kind(p) is ParamKind.TOGGLE for p in params):
+        raise ValueError(f"toggles cannot carry a ramp; choose knobs or the fader, got {list(params)}")
     report = report or (lambda _message: None)
     timing = device.shell.video_state().output_timing
     probe = _Probe(device, params, timeout, clock, sleep)
@@ -216,3 +233,46 @@ def measure_latency(
         prior=tuple(int(v) for v in probe.prior),
         restored=restored,
     )
+
+
+class CcProbeReport(NamedTuple):
+    """Per param, the params whose readback moved when only its CC was written."""
+
+    moved: tuple
+    restored: bool
+
+    @property
+    def ok(self):
+        """True when each CC moved its own slot and nothing else."""
+        return all(moved == (param,) for param, moved in zip(CC_PARAMS, self.moved))
+
+    def as_dict(self):
+        """JSON-ready summary."""
+        moved = {str(p): list(m) for p, m in zip(CC_PARAMS, self.moved)}
+        return {"ok": self.ok, "moved": moved, "restored": self.restored}
+
+
+def probe_cc_map(
+    device, *, timeout=1.0, clock=time.monotonic, sleep=time.sleep, report=None
+) -> CcProbeReport:
+    """Write each param's CC alone over MIDI and record which slots read back moved.
+
+    Manual values are lowered to zero for headroom; they and the prior CC offsets
+    are restored afterwards. Every slot must be free of modulation sources.
+    """
+    report = report or (lambda _message: None)
+    probe = _Probe(device, CC_PARAMS, timeout, clock, sleep, floor=True)
+    moved = []
+    try:
+        for param, headroom in zip(CC_PARAMS, probe.headroom):
+            probe.reset()
+            report(f"P{param} alone at offset {headroom}")
+            target = probe.manual.copy()
+            target[param - 1] += headroom
+            device.set_params({param: int(headroom)})
+            probe.converge(target, clock())
+            delta = np.abs(probe.read() - probe.manual) > PARK_TOLERANCE
+            moved.append(tuple(int(i) + 1 for i in np.flatnonzero(delta)))
+    finally:
+        restored = probe.restore()
+    return CcProbeReport(tuple(moved), restored)

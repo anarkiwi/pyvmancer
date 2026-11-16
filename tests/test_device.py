@@ -1,12 +1,14 @@
 """ProgramParameter scaling, the Videomancer facade, and backend selection."""
 
 import json
+import logging
 
 import numpy as np
 import pytest
 
 from pyvmancer import device as device_module
 from pyvmancer.const import (
+    CC_MAP_UNASSIGNED,
     BOOL_THRESHOLD,
     CROSSFADER_PARAM,
     PARAM_COUNT,
@@ -16,7 +18,7 @@ from pyvmancer.const import (
     ParamRole,
 )
 from pyvmancer.device import PARK_TOLERANCE, ProgramParameter, Videomancer, open_midi, open_shell
-from pyvmancer.errors import DeviceNotFoundError, TransportUnavailableError, VmancerError
+from pyvmancer.errors import CcMapError, DeviceNotFoundError, TransportUnavailableError, VmancerError
 from pyvmancer.midi import MidiController
 from pyvmancer.programs import MANIFEST_PATH
 from pyvmancer.shell import ShellClient
@@ -208,14 +210,73 @@ def test_set_source_by_name(vm, fakes):
     assert fakes[1].last == "modulation source 1 1"
 
 
-def test_load_program_invalidates_parameter_cache(vm, fakes):
-    """Loading a new program forces the next parameter query to re-fetch."""
+def test_load_program_rereads_parameters_and_assigns_cc_map(vm, fakes, caplog):
+    """A load re-reads ``program info`` and writes all 12 CC keys even when the map is already right."""
     vm.parameters()
     fakes[1].on_error("programs authors", 1, "unknown command")
-    vm.load_program("perlin", settle=0)
-    assert fakes[1].last == "program load perlin"
+    with caplog.at_level(logging.INFO, logger="pyvmancer.device"):
+        vm.load_program("perlin", settle=0)
+    written = fakes[1].written
+    assert (
+        written.index("program load perlin")
+        < written.index("program info", 1)
+        < written.index("settings set 200 131071")
+    )
+    assert fakes[1].cc.writes == [
+        (200 + i, v) for i in range(PARAM_COUNT) for v in (CC_MAP_UNASSIGNED, 0x1FF00 | i)
+    ]
+    assert written[-1] == "modulation cc-map"
     vm.parameters()
-    assert fakes[1].written.count("program info") == 2
+    assert written.count("program info") == 2
+    assert "cc-map: assigned P1..P12 -> CC0..11 (was: ok)" in caplog.text
+    assert vm.cc_assignment.after.ok
+
+
+def test_load_program_raises_when_the_map_does_not_take(vm, fakes):
+    """A slot that does not follow its settings write is an error, not a silent adaptation."""
+    fakes[1].on_error("programs authors", 1, "unknown command")
+    fakes[1].cc.set_setting = lambda key, value: fakes[1].cc.writes.append((key, value))
+    fakes[1].cc.live[11] = 0
+    with pytest.raises(CcMapError, match="P12 CC0"):
+        vm.load_program("perlin", settle=0)
+
+
+def test_park_sends_the_sink_cc_first_and_reassigns_its_capture(vm, fakes):
+    """An armed MIDI Assign captures the sink CC park sends first; that capture is reassigned and recorded."""
+    fakes[1].on("modulation status", _park_status())
+    fakes[1].cc.live[11] = 119
+    vm.program = "Pulp"
+    vm.park(sleep=lambda _: None)
+    assert fakes[0].data.startswith(bytes([0xB0, 119, 0]))
+    assert fakes[1].cc.live == list(range(PARAM_COUNT)) and vm.cc_assignment.before.armed == (12,)
+    assert "MIDI Assign was armed on P12" in vm.cc_assignment.summary()
+    assert [(e["program"], e["phase"], e["params"]) for e in vm.assign_events] == [("Pulp", "park", (12,))]
+
+
+def test_park_leaves_a_correct_map_alone(vm, fakes):
+    """With nothing captured, park only reads the map back."""
+    fakes[1].on("modulation status", _park_status())
+    vm.park(sleep=lambda _: None)
+    assert not fakes[1].cc.writes and vm.cc_assignment is None and not vm.assign_events
+
+
+def test_park_raises_when_a_driven_cc_was_captured(vm, fakes):
+    """A slot on any CC other than the sink means a real CC was learned; that fails rather than repairs."""
+    fakes[1].on("modulation status", _park_status())
+    fakes[1].cc.live[11] = 0
+    with pytest.raises(CcMapError, match="P1 CC0, P12 CC0"):
+        vm.park(sleep=lambda _: None)
+    assert not fakes[1].cc.writes
+
+
+def test_preset_recall_assigns_cc_map(vm, fakes):
+    """Both preset paths reassign the map; a MIDI-only facade only sends the program change."""
+    vm.apply_preset(1, "factory")
+    assert "program presets apply 1 factory" in fakes[1].written and len(fakes[1].cc.writes) == 24
+    vm.select_preset(2)
+    assert len(fakes[1].cc.writes) == 48
+    Videomancer(midi=MidiController(fakes[0])).select_preset(3)
+    assert fakes[0].data.endswith(bytes([0xC0, 3]))
 
 
 def test_play_and_stop_prefer_shell(vm, fakes):
@@ -241,7 +302,7 @@ def test_midi_delegation(vm, fakes):
     vm.set_params({12: 0})
     vm.trigger(2, velocity=64)
     vm.select_preset(3)
-    assert fakes[0].data.endswith(bytes([0x90, 1, 64, 0xC0, 3]))
+    assert fakes[0].data.endswith(bytes([0x90, 1, 64, 0xC0, 3, 0xB0, 119, 0]))
 
 
 def test_shell_delegation(vm, fakes):

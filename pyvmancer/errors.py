@@ -53,3 +53,7 @@ class VideoTimingIgnored(VmancerError):
             f"video timing {requested} acknowledged but output is {actual}; "
             "check front panel SETTINGS > Vid Route Mode and SYSTEM > Pref. Timing"
         )
+
+
+class CcMapError(VmancerError):
+    """The device's MIDI CC map differs from the CCs the controller sends on."""
