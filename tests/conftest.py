@@ -6,7 +6,15 @@ import json
 import pytest
 
 from pyvmancer.ccmap import encode_setting
-from pyvmancer.const import CC_MAP_SETTING_KEY, CC_MAP_UNASSIGNED, CC_MSB_MASK, DEFAULT_CC_MSB
+from pyvmancer.const import (
+    CC_MAP_SETTING_KEY,
+    CC_MAP_UNASSIGNED,
+    CC_MSB_MASK,
+    DEFAULT_CC_MSB,
+    ROUTE_HDMI_IN,
+    ROUTE_SETTING_KEY,
+)
+from pyvmancer.errors import ShellError
 from pyvmancer.midi import MidiController, lsb_partner
 from pyvmancer.shell import ShellClient, decoded_limit
 from pyvmancer.transports.base import ByteTransport, MidiTransport
@@ -35,9 +43,13 @@ def error_line(code, message):
 
 
 class FakeCcMap:
-    """A device CC map whose live slots and settings keys can disagree; rewriting a key's value is ignored."""
+    """A device CC map whose live slots and settings keys can disagree; rewriting a key's value is ignored.
 
-    def __init__(self, live=DEFAULT_CC_MSB, keys=None):
+    ``route`` is the Vid Route Mode settings key's value; None answers that key as an error.
+    """
+
+    def __init__(self, live=DEFAULT_CC_MSB, keys=None, route=ROUTE_HDMI_IN):
+        self.route = route
         self.live = list(live)
         self.keys = [encode_setting(m) for m in live] if keys is None else list(keys)
         self.writes = []
@@ -53,6 +65,10 @@ class FakeCcMap:
 
     def get_setting(self, key):
         """``settings get`` payload."""
+        if key == ROUTE_SETTING_KEY:
+            if self.route is None:
+                raise ShellError(2, "unknown key", f"settings get {key}")
+            return json.dumps({"key": key, "type": "uint32", "value": self.route})
         return json.dumps({"key": key, "type": "uint32", "value": self.keys[key - CC_MAP_SETTING_KEY]})
 
     def set_setting(self, key, value):
@@ -71,12 +87,13 @@ class FakeCcMap:
             return json.dumps(self.cc_map())
         if words[0] != "settings" or len(words) < 3 or not words[2].isdigit():
             return None
-        if not 0 <= int(words[2]) - CC_MAP_SETTING_KEY < len(self.keys):
+        key = int(words[2])
+        if key != ROUTE_SETTING_KEY and not 0 <= key - CC_MAP_SETTING_KEY < len(self.keys):
             return None
         if words[1] == "get":
-            return self.get_setting(int(words[2]))
-        if words[1] == "set":
-            self.set_setting(int(words[2]), int(words[3]))
+            return self.get_setting(key)
+        if words[1] == "set" and key != ROUTE_SETTING_KEY:
+            self.set_setting(key, int(words[3]))
             return "ok"
         return None
 
@@ -165,6 +182,8 @@ class FakeByteTransport(ByteTransport):
     def fpga(self, state="running", configured=True, program=None):
         """An ``fpga status`` reply line; ``program`` defaults to the last one loaded."""
         status = {"state": state, "configured": configured, "program": program or self.loaded}
+        if self._author is not None:
+            status["browse_author"] = self._author
         return reply_line("fpga", json.dumps(status))
 
     def hold(self, command, reads):

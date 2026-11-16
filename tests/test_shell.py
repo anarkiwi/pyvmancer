@@ -6,7 +6,12 @@ import json
 import pytest
 
 from pyvmancer.const import PARAM_COUNT, PARAM_MAX, SHELL_MAX_LINE, PresetBank, TransportState
-from pyvmancer.errors import ShellError, ShellTimeoutError, VideoTimingIgnored, VmancerError
+from pyvmancer.errors import (
+    ShellError,
+    ShellTimeoutError,
+    VideoTimingIgnored,
+    VmancerError,
+)
 from pyvmancer.programs import MANIFEST_PATH
 from pyvmancer.shell import (
     ERROR_TAG_MASK,
@@ -409,15 +414,6 @@ def test_programs_for_one_author_is_plain_and_paged(shell, byte_transport):
     byte_transport.on("programs list", '{"programs":["a","b"],"more":true,"next":2}')
     byte_transport.on("programs list 2", '{"programs":["c"],"more":false}')
     assert shell.programs("czartroniks") == ["a", "b", "c"]
-
-
-def test_programs_skips_enumerate_for_active_author(shell, byte_transport):
-    """A second listing of the active author does not re-enumerate."""
-    multi_author(byte_transport, {"lzx": 0})
-    byte_transport.on("programs list", '{"programs":["a"]}')
-    shell.programs("lzx")
-    shell.programs("lzx")
-    assert byte_transport.written.count("programs enumerate lzx") == 1
 
 
 def test_load_qualified_program_enumerates_first(shell, byte_transport):

@@ -9,7 +9,9 @@ manufactures a fault. ``hdmi.connected`` is advisory and never checked. :func:`d
 from typing import Iterable, NamedTuple
 
 from .ccmap import CcMapReport, cc_map_report, expected_cc_map
+from .const import ROUTE_MODES
 from .latency import CcProbeReport, LatencyReport, measure_latency
+from .route import describe_route, read_route, route_name
 from .video import VideoStatus
 
 #: The CLI command that restores the default CC map.
@@ -160,10 +162,31 @@ def diagnose_cc_probe(probe: CcProbeReport) -> Finding:
     )
 
 
-def diagnose(shell, midi=None) -> list[Finding]:
+def diagnose_route(value, expected=None):
+    """``video.route``: Vid Route Mode reads ``expected``; with no expectation it is reported, not checked.
+
+    An unreported route is skipped (None) unless a value is expected, which then fails.
+    """
+    if value is None and expected is None:
+        return None
+    detail = f"Vid Route Mode {describe_route(value)}"
+    if expected is not None:
+        detail += f", expected {describe_route(expected)}"
+    target = route_name(expected) if expected in ROUTE_MODES else f"the mode that reads {expected}"
+    return _finding(
+        "video.route",
+        expected is None or value == expected,
+        detail,
+        f"on the front panel set SETTINGS > Vid Route Mode to {target}; under another route the "
+        "processor can be fed nothing while `video status` still reports the source locked",
+    )
+
+
+def diagnose(shell, midi=None, route=None) -> list[Finding]:
     """Run every read-only device check over an open :class:`~pyvmancer.shell.ShellClient`.
 
     ``midi`` is the :class:`~pyvmancer.midi.MidiController` whose CC map is expected; default CCs otherwise.
+    ``route`` is the expected Vid Route Mode value; None reports the route without checking it.
     """
     findings = [Finding("firmware.version", True, shell.version().strip())]
     fpga = shell.fpga_status()
@@ -180,7 +203,8 @@ def diagnose(shell, midi=None) -> list[Finding]:
     cc_map = cc_map_report(shell, midi)
     if cc_map is not None:
         findings.append(diagnose_cc_map(cc_map))
-    return findings + diagnose_video(shell.video_state())
+    routed = diagnose_route(read_route(shell), route)
+    return findings + ([] if routed is None else [routed]) + diagnose_video(shell.video_state())
 
 
 def _timed(latency, seconds):

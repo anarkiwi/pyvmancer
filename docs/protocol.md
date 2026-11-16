@@ -237,4 +237,22 @@ reply on liveness (see firmware-notes, "Liveness waits"). `programs list` and `p
 act on the active author. `ShellClient.programs()` visits every author (`lzx`
 first, then the rest sorted) and qualifies non-`lzx` names as `author/Name`, since
 the same name can exist under two authors; `load_program` accepts the same form.
-Firmware without `programs authors` is listed and loaded as a single set.
+Firmware without `programs authors` is listed and loaded as a single set; only
+an unknown-command or usage error (codes 1 and 2) means that, and any other
+failure of `programs authors` raises rather than listing the active author alone.
+
+Every listing enumerates its author and checks the names against the reply:
+`author` must be the one asked for, the paged names must number `count` and be
+unique, none may contain `/`, and `fpga status` `browse_author`, when reported,
+must still be that author once listed. A listing that fails is re-enumerated and
+re-listed once, then raises `ProgramListError` naming both attempts. A load skips
+`programs enumerate` only when `browse_author` already names its author, since
+another client can switch it.
+
+### Reply tags
+
+A reply is tagged with its command's first word (`@programs:` for `programs
+list`, `@fpga:` for `fpga status`). `ShellClient` sets aside a reply tagged with
+another command group's word as another client's, in `foreign_lines`, and raises
+`InterleavedReplyError` for a line with a reply or error spliced into it, e.g.
+`@modulation:{"ac@programs:{"author":...`, which two processes on the port produce.

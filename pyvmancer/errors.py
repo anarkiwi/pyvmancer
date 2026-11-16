@@ -86,3 +86,26 @@ class VideoTimingIgnored(VmancerError):
 
 class CcMapError(VmancerError):
     """The device's MIDI CC map differs from the CCs the controller sends on."""
+
+
+class InterleavedReplyError(VmancerError):
+    """A reply line carries another reply spliced into it: a second client is using the serial port."""
+
+    def __init__(self, command, line):
+        self.command = command
+        self.line = line
+        super().__init__(
+            f"{command!r}: reply {line!r} carries another reply spliced in; close any other client "
+            "on the serial port"
+        )
+
+
+class ProgramListError(VmancerError):
+    """An author's program listing disagreed with the device's own count, twice."""
+
+    def __init__(self, author, problems):
+        self.author = author
+        self.problems = tuple(problems)
+        super().__init__(
+            f"programs of {author!r} are inconsistent: {problems[0]}; re-enumerated: {problems[-1]}"
+        )

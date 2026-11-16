@@ -5,7 +5,6 @@ unassigned. Settings key ``CC_MAP_SETTING_KEY + slot`` persists it as ``CC_MAP_A
 or ``CC_MAP_UNASSIGNED``; nothing is written unless every key on the device fits that.
 """
 
-import json
 from collections import defaultdict
 from typing import NamedTuple
 
@@ -20,6 +19,7 @@ from .const import (
 )
 from .errors import CcMapError, VmancerError
 from .midi import MidiController, lsb_partner
+from .shell import read_setting
 
 PARAMS = tuple(range(1, PARAM_COUNT + 1))
 
@@ -170,14 +170,9 @@ def _require_report(shell, midi):
 
 def read_cc_settings(shell):
     """The 12 CC-map settings values, as ``settings get`` reports them."""
-    values = []
-    for key in range(CC_MAP_SETTING_KEY, CC_MAP_SETTING_KEY + PARAM_COUNT):
-        reply = json.loads(shell.get_setting(key))
-        value = reply.get("value") if isinstance(reply, dict) else reply
-        if not isinstance(value, int) or isinstance(value, bool):
-            raise VmancerError(f"settings key {key} reply {reply!r} carries no integer value")
-        values.append(value)
-    return tuple(values)
+    return tuple(
+        read_setting(shell, key) for key in range(CC_MAP_SETTING_KEY, CC_MAP_SETTING_KEY + PARAM_COUNT)
+    )
 
 
 def check_encoding(values):

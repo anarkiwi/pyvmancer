@@ -17,6 +17,9 @@ from .const import (
     OperatorCategory,
     ParamKind,
     ParamRole,
+    ROUTE_HDMI_IN,
+    ROUTE_MODES,
+    ROUTE_SETTING_KEY,
     PresetBank,
     TransportState,
     classify_param,
@@ -41,6 +44,7 @@ from .diagnose import (
     diagnose_cc_probe,
     diagnose_latency,
     diagnose_midi,
+    diagnose_route,
     diagnose_video,
 )
 from .discovery import DeviceInfo, attached, find_device, find_devices
@@ -48,6 +52,8 @@ from .errors import (
     DeviceGoneError,
     DeviceNotFoundError,
     FirmwareError,
+    InterleavedReplyError,
+    ProgramListError,
     ProgramLoadError,
     ShellError,
     ShellTimeoutError,
@@ -82,7 +88,8 @@ from .library import (
 )
 from .midi import MidiController
 from .programs import MANIFEST_PATH, ProgramEntry, ProgramManifest
-from .shell import Reply, ShellClient, encode_preset, parse_line
+from .route import describe_route, parse_route, read_route, route_name
+from .shell import Reply, ShellClient, encode_preset, listing_problems, parse_line, read_setting
 from .video import VideoStatus, frame_period
 
 __version__ = VERSION
@@ -102,6 +109,7 @@ __all__ = [
     "FIRMWARE_REPO",
     "Finding",
     "FirmwareError",
+    "InterleavedReplyError",
     "LIBRARY_PRODUCT",
     "LatencyReport",
     "LibraryEntry",
@@ -119,7 +127,11 @@ __all__ = [
     "ParamKind",
     "ParamRole",
     "PresetBank",
+    "ROUTE_HDMI_IN",
+    "ROUTE_MODES",
+    "ROUTE_SETTING_KEY",
     "ProgramEntry",
+    "ProgramListError",
     "ProgramLoadError",
     "ProgramManifest",
     "ProgramParameter",
@@ -144,11 +156,13 @@ __all__ = [
     "assign_cc_map",
     "cc_map_report",
     "classify_param",
+    "describe_route",
     "diagnose",
     "diagnose_cc_map",
     "diagnose_cc_probe",
     "diagnose_latency",
     "diagnose_midi",
+    "diagnose_route",
     "diagnose_video",
     "download_library",
     "encode_preset",
@@ -158,6 +172,7 @@ __all__ = [
     "find_devices",
     "frame_period",
     "inspect_uf2",
+    "listing_problems",
     "install",
     "install_library",
     "library_entries",
@@ -167,11 +182,15 @@ __all__ = [
     "open_shell",
     "param_kind",
     "parse_line",
+    "parse_route",
     "probe_cc_map",
+    "read_route",
+    "read_setting",
     "reassert_cc_map",
     "resolve_library",
     "resolve_operator",
     "resolve_release",
+    "route_name",
     "sink_cc",
     "upgrade",
     "verify_cc_map",

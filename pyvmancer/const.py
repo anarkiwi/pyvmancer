@@ -7,7 +7,7 @@ serial command guide. See ``docs/protocol.md`` for provenance of each table.
 from enum import Enum, IntEnum
 
 #: Package version. Lives here so leaf modules can read it without importing the package.
-VERSION = "0.6.3"
+VERSION = "0.6.4"
 
 USB_VID = 0x16D0
 USB_PID = 0x14DB
@@ -40,6 +40,12 @@ CC_MAP_ASSIGNED = 0x1FF00
 CC_MAP_UNASSIGNED = 0x1FFFF
 #: Bits of a CC-map setting holding the MSB.
 CC_MSB_MASK = 0xFF
+#: Settings key holding front panel SETTINGS > Vid Route Mode, as observed on 1.0.1.
+ROUTE_SETTING_KEY = 1
+#: Vid Route Mode values observed on 1.0.1, by panel name; no other mode's value is confirmed.
+ROUTE_MODES = {1: "HDMI In", 4: "Auto"}
+#: The route a rig fed only over HDMI runs under.
+ROUTE_HDMI_IN = 1
 
 #: MIDI notes 0..11 trigger modulators P1..P12.
 NOTE_BASE = 0
@@ -309,6 +315,37 @@ class ShellErrorCode(IntEnum):
     SD_NOT_MOUNTED = 8
     PATH_TOO_LONG = 9
     INVALID_PATH = 10
+
+
+#: Codes by which the firmware positively lacks a command: unknown, or a usage error for its words.
+ABSENT_COMMAND_CODES = frozenset({ShellErrorCode.UNKNOWN_COMMAND, ShellErrorCode.PARSE_ERROR})
+#: First words of the shell's command groups. A reply is tagged ``@<first word>:``, so one tagged
+#: with another group's word answers some other client's command.
+COMMAND_GROUPS = frozenset(
+    {
+        "cpu",
+        "fpga",
+        "fs",
+        "help",
+        "language",
+        "log",
+        "midi",
+        "modulation",
+        "msd",
+        "program",
+        "programs",
+        "ram",
+        "reboot",
+        "remote",
+        "screen",
+        "serial",
+        "settings",
+        "status",
+        "transport",
+        "version",
+        "video",
+    }
+)
 
 
 #: Firmware-embedded programs; query ``programs list`` for the full SD-backed set.
