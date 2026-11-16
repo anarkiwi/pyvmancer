@@ -89,6 +89,11 @@ def build_parser():
 
     load = sub.add_parser("load", help="load an FPGA program by name or author/Name, then assign the CC map")
     load.add_argument("name")
+    load.add_argument(
+        "--stall",
+        type=float,
+        help="opt-in: fail once nothing observable changes for this many seconds (default: wait on USB)",
+    )
 
     sub.add_parser("manifest", help="show the SD program manifest over serial")
     sub.add_parser("resync", help="bounce the video timing to recover the output")
@@ -222,6 +227,7 @@ def _run_midi(args):
 def _run_shell(args):
     """Handle subcommands that need the serial link."""
     with open_shell(serial_number=args.serial_number) as shell:
+        shell.report = _note
         if args.command == "status":
             _print_json(shell.status())
         elif args.command == "programs":
@@ -291,6 +297,7 @@ def _run_cc_map(args):
 def _run_load(args):
     """Load a program through the facade, so the CC map is assigned afterwards."""
     with Videomancer.open(serial_number=args.serial_number, channel=args.channel) as device:
+        device.shell.report, device.shell.stall = _note, args.stall
         device.load_program(args.name)
         _note(device.cc_assignment.summary())
     return 0

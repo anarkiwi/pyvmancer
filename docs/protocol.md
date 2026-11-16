@@ -232,8 +232,8 @@ Firmware `1.0.2-rc.5` lists and loads one author's programs at a time.
 `programs authors` returns `{"count","authors":[...]}`; `programs enumerate
 <author>` switches the active author and rebuilds the list, replying
 `{"author","skipped","count","before","overflow","active_author"}`. Large
-authors take longer than the default reply deadline, so `ShellClient` allows
-`ENUMERATE_TIMEOUT` for that command only. `programs list` and `program load`
+authors take longer than the default reply deadline, so `ShellClient` awaits that
+reply on liveness (see firmware-notes, "Liveness waits"). `programs list` and `program load`
 act on the active author. `ShellClient.programs()` visits every author (`lzx`
 first, then the rest sorted) and qualifies non-`lzx` names as `author/Name`, since
 the same name can exist under two authors; `load_program` accepts the same form.

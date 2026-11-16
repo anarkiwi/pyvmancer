@@ -8,12 +8,14 @@ endpoints are used directly. Needs read-write access to the usbfs node.
 import time
 
 from ..const import USB_PID, USB_VID
+from ..discovery import attached
 from ..errors import DeviceNotFoundError, TransportError, TransportUnavailableError
 from .base import ByteTransport
-from .serial_tty import WRITE_TIMEOUT
 
-#: Bulk write deadline in milliseconds; see :data:`.serial_tty.WRITE_TIMEOUT`.
-WRITE_TIMEOUT_MS = int(WRITE_TIMEOUT * 1000)
+#: Bulk write deadline in milliseconds. pyusb reports no byte count for a bulk
+#: write that times out, so the write cannot be resumed and is bounded instead;
+#: the tty transport, which can resume, waits on liveness.
+WRITE_TIMEOUT_MS = 30_000
 
 CDC_COMM_CLASS = 0x02
 CDC_DATA_CLASS = 0x0A
@@ -103,6 +105,10 @@ class UsbCdcTransport(ByteTransport):
     def name(self):
         """Bus/address identifier of the claimed USB device."""
         return f"usb:{self._device.bus:03d}:{self._device.address:03d}"
+
+    def present(self):
+        """Whether the claimed device is still enumerated at its bus address, read from sysfs."""
+        return attached(self._device.bus, self._device.address)
 
     def write(self, data):
         """Write bytes to the bulk OUT endpoint."""

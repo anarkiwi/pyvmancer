@@ -9,12 +9,9 @@ from pyvmancer.const import PARAM_COUNT, PARAM_MAX, SHELL_MAX_LINE, PresetBank, 
 from pyvmancer.errors import ShellError, ShellTimeoutError, VideoTimingIgnored, VmancerError
 from pyvmancer.programs import MANIFEST_PATH
 from pyvmancer.shell import (
-    ENUMERATE_TIMEOUT,
     ERROR_TAG_MASK,
-    HASH_TIMEOUT_FACTOR,
     PUT_MAX_BYTES,
     READ_CHUNK,
-    WRITE_CHUNK,
     Reply,
     ShellClient,
     decode_error_code,
@@ -383,16 +380,11 @@ def test_authors(shell, byte_transport):
     assert shell.authors() == ["lzx", "boneoh"]
 
 
-def test_enumerate_author_uses_long_timeout_and_skips_when_active(shell, byte_transport):
-    """Enumerating allows the long deadline per call, and is skipped once active."""
+def test_enumerate_author_skips_when_active(shell, byte_transport):
+    """Enumerating is skipped once the author is active."""
     byte_transport.on("programs enumerate lzx", '{"author":"lzx","count":3}')
-    seen = []
-    real = shell.command
-    shell.command = lambda *p, timeout=None: seen.append(timeout) or real(*p, timeout=timeout)
     assert shell.enumerate_author("lzx")["count"] == 3
     assert shell.enumerate_author("lzx")["count"] == 3
-    assert seen == [ENUMERATE_TIMEOUT]
-    assert shell.timeout == 0.2
     assert byte_transport.written.count("programs enumerate lzx") == 1
 
 
@@ -571,83 +563,6 @@ def test_hash_file(shell, byte_transport):
     assert shell.hash_file("sd:/programs/x.vmprog") == {"hash": "abc123", "size": 4096}
 
 
-def _record_timeouts(client, monkeypatch):
-    """Capture the timeout each command is issued with."""
-    seen = {}
-    original = client.command
-
-    def recorder(*parts, timeout=None):
-        seen[" ".join(str(part) for part in parts)] = timeout
-        return original(*parts, timeout=timeout)
-
-    monkeypatch.setattr(client, "command", recorder)
-    return seen
-
-
-#: Sizes and wall-clock hash times measured on hardware, about 79 kB/s.
-MEASURED_HASHES = [(16526, 0.21), (322934, 3.98), (439221, 5.40)]
-
-
-@pytest.mark.parametrize("size,measured", MEASURED_HASHES)
-def test_hash_timeout_covers_measured_hardware_times(size, measured):
-    """The derived deadline clears every hash time actually observed on the device."""
-    assert ShellClient(FakeByteTransport()).hash_timeout(size) > measured
-
-
-def test_hash_timeout_of_a_large_file_exceeds_the_default(byte_transport, monkeypatch):
-    """A program binary hashes past the 5.0s default, so the deadline must grow."""
-    path = "sd:/programs/lzx/combing.vmprog"
-    byte_transport.on(f"fs stat {path}", '{"size":439221}')
-    byte_transport.on(f"fs hash {path}", '{"hash":"abc123","size":439221}')
-    client = ShellClient(byte_transport)
-    seen = _record_timeouts(client, monkeypatch)
-    client.hash_file(path)
-    assert seen[f"fs hash {path}"] > client.timeout
-    assert seen[f"fs hash {path}"] > 5.40
-
-
-def test_hash_timeout_floor_is_the_client_timeout(byte_transport, monkeypatch):
-    """A small file never shortens the deadline below the client's own timeout."""
-    byte_transport.on("fs stat sd:/a.txt", '{"size":16}')
-    byte_transport.on("fs hash sd:/a.txt", '{"hash":"abc123","size":16}')
-    client = ShellClient(byte_transport)
-    seen = _record_timeouts(client, monkeypatch)
-    client.hash_file("sd:/a.txt")
-    assert seen["fs hash sd:/a.txt"] == client.timeout
-
-
-def test_hash_timeout_scales_with_size():
-    """Bigger files get proportionally longer deadlines at the documented rate."""
-    client = ShellClient(FakeByteTransport())
-    assert client.hash_timeout(4_000_000) > client.hash_timeout(400_000) > client.hash_timeout(40_000)
-    assert client.hash_timeout(790_000) == pytest.approx(HASH_TIMEOUT_FACTOR * 10.0)
-
-
-def test_hash_file_explicit_timeout_skips_the_stat(shell, byte_transport, monkeypatch):
-    """A caller who knows better keeps the escape hatch, and pays no extra round trip."""
-    byte_transport.on("fs hash sd:/b.bin", '{"hash":"abc123","size":1}')
-    seen = _record_timeouts(shell, monkeypatch)
-    shell.hash_file("sd:/b.bin", timeout=90.0)
-    assert seen["fs hash sd:/b.bin"] == 90.0
-    assert "fs stat sd:/b.bin" not in byte_transport.written
-
-
-def test_hash_file_survives_a_stat_without_a_size(shell, byte_transport, monkeypatch):
-    """Firmware omitting the size falls back to the client timeout, not a crash."""
-    byte_transport.on("fs stat sd:/c.bin", "{}")
-    byte_transport.on("fs hash sd:/c.bin", '{"hash":"abc123"}')
-    seen = _record_timeouts(shell, monkeypatch)
-    shell.hash_file("sd:/c.bin")
-    assert seen["fs hash sd:/c.bin"] == shell.timeout
-
-
-def test_chunked_transfers_need_no_derived_deadline():
-    """Read and write commands carry a bounded chunk, unlike a whole-file verb."""
-    client = ShellClient(FakeByteTransport())
-    assert client.hash_timeout(decoded_limit(READ_CHUNK)) == client.timeout
-    assert client.hash_timeout(WRITE_CHUNK) == client.timeout
-
-
 def test_hash_file_validates_path(shell):
     """The digest verb takes the same path checks as every other fs verb."""
     with pytest.raises(ValueError, match="must start with"):
@@ -781,11 +696,6 @@ def test_put_file_checks_the_written_count(shell, byte_transport):
     _script_put(byte_transport, "sd:/p.bin", 3, written=1)
     with pytest.raises(VmancerError, match="wrote 1 of 3"):
         shell.put_file("sd:/p.bin", b"abc")
-
-
-def test_put_timeout_scales_with_payload_size(shell):
-    """A 14 MB library must not be judged against a five second deadline."""
-    assert shell.put_timeout(4_000_000) > shell.put_timeout(4_000)
 
 
 def test_put_max_bytes_falls_back_when_caps_are_unreadable(shell, byte_transport):

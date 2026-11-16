@@ -25,6 +25,7 @@ from .const import (
     resolve_operator,
 )
 from .errors import ProgramLoadError, ShellError, ShellTimeoutError, VideoTimingIgnored, VmancerError
+from .liveness import POLL_S, REPORT_S, Watch
 from .programs import MANIFEST_PATH, ProgramManifest
 from .video import VideoStatus, parse_timings
 
@@ -40,20 +41,10 @@ COMBINED_KEYS = ("o", "out", "output", "combined")
 MANUAL_KEYS = ("m", "manual")
 #: Default seconds to wait after a timing change before re-reading the lock flags.
 RESYNC_SETTLE = 3.5
-#: ``fs hash`` throughput measured on hardware, bytes per second.
-HASH_BYTES_PER_SECOND = 79_000
-#: Headroom over the measured hash rate, for a slower card or a busier device.
-#: Reply deadline for ``programs enumerate``, which rebuilds the list from the card.
-ENUMERATE_TIMEOUT = 60.0
 #: The author whose programs are listed and loaded without a prefix.
 DEFAULT_AUTHOR = "lzx"
-HASH_TIMEOUT_FACTOR = 4.0
 #: Bytes per write while streaming an ``fs put`` payload.
 PUT_CHUNK = 4096
-#: ``fs put`` throughput measured on hardware, bytes per second.
-PUT_BYTES_PER_SECOND = 157_000
-#: Headroom over the measured put rate, for a slower card or a busier device.
-PUT_TIMEOUT_FACTOR = 4.0
 #: ``fs caps`` ``put_max_bytes`` default, bounding one ``fs put`` payload.
 PUT_MAX_BYTES = 8 << 20
 #: Entries one ``fs ls`` page returns.
@@ -78,6 +69,11 @@ def fpga_running(status, program=None):
         and bool(status.get("configured", True))
         and (program is None or str(name).casefold() == program.casefold())
     )
+
+
+def fpga_key(status):
+    """``(state, configured, program)`` of an ``fpga status``, the fields a load is judged on."""
+    return status.get("state"), status.get("configured"), status.get("program")
 
 
 def _pick(data, keys):
@@ -202,11 +198,23 @@ class ShellClient:
 
     The device shell is single-threaded and expects one connected terminal, so
     calls are strictly request/response.
+
+    ``timeout`` bounds the reply to an ordinary command. Commands that keep the
+    shell busy with device-side work (loads, author enumeration, hashing,
+    ``fs put``, settings import and export) are instead awaited for as long as
+    the device stays on USB; see :mod:`pyvmancer.liveness`. ``report`` receives
+    their progress lines every ``report_interval`` seconds, and ``stall``, off
+    when None, is the opt-in guard that fails one once nothing observable has
+    changed for that many seconds.
     """
 
-    def __init__(self, transport, timeout=5.0):
+    def __init__(self, transport, timeout=5.0, report=None, stall=None, report_interval=REPORT_S):
         self._transport = transport
         self.timeout = timeout
+        self.report = report
+        self.stall = stall
+        self.report_interval = report_interval
+        self.clock = time.monotonic
         self._buffer = bytearray()
         self.log_lines = []
         self._author = None
@@ -217,23 +225,41 @@ class ShellClient:
         """The underlying byte transport."""
         return self._transport
 
-    def command(self, *parts, timeout=None):
-        """Send a command and return its :class:`Reply`."""
+    def watch(self, what):
+        """A :class:`~pyvmancer.liveness.Watch` for one long operation, on this client's settings."""
+        return Watch(
+            what,
+            self._transport.present,
+            report=self.report,
+            interval=self.report_interval,
+            stall=self.stall,
+            clock=self.clock,
+        )
+
+    def command(self, *parts, timeout=None, watch=None):
+        """Send a command and return its :class:`Reply`.
+
+        With a ``watch`` the reply has no deadline: it is awaited while the
+        device stays on USB, and nothing else is sent meanwhile.
+        """
         command = " ".join(_arg(p) for p in parts if p is not None and p != "")
         if len(command) > SHELL_MAX_LINE:
             raise ValueError(f"command exceeds {SHELL_MAX_LINE} bytes: {len(command)}")
         self._buffer.clear()
         self._transport.write(command.encode("ascii", "strict") + b"\n")
-        return self._await_reply(command, self.timeout if timeout is None else timeout)
+        return self._await_reply(command, self.timeout if timeout is None else timeout, watch)
 
-    def _await_reply(self, command, timeout):
+    def _await_reply(self, command, timeout, watch=None):
         """Read lines until a reply or error arrives, collecting log output.
 
         Lines are taken one at a time rather than drained in a batch, so
         whatever follows a reply in the same read stays buffered for the next
-        call instead of being dropped with the batch.
+        call instead of being dropped with the batch. Without a ``watch`` the
+        wait ends at ``timeout``; with one, each read that brings nothing is a
+        busy shell, and only the watch ends the wait.
         """
-        deadline = time.monotonic() + timeout
+        deadline = self.clock() + timeout
+        quiet = False
         while True:
             line = self._pop_line()
             while line is not None:
@@ -245,10 +271,16 @@ class ShellClient:
                 if value:
                     self.log_lines.append(value)
                 line = self._pop_line()
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise ShellTimeoutError(command, timeout)
-            chunk = self._transport.read(timeout=min(0.2, remaining))
+            if watch is not None:
+                if quiet:
+                    watch.observe(f"shell busy on {command!r}", (len(self.log_lines), len(self._buffer)))
+                remaining = POLL_S
+            else:
+                remaining = deadline - self.clock()
+                if remaining <= 0:
+                    raise ShellTimeoutError(command, timeout)
+            chunk = self._transport.read(timeout=min(POLL_S, remaining))
+            quiet = not chunk
             if chunk:
                 self._buffer.extend(chunk)
 
@@ -261,13 +293,13 @@ class ShellClient:
         del self._buffer[: index + 1]
         return raw.decode("ascii", "replace")
 
-    def _ok(self, *parts, accept=()):
+    def _ok(self, *parts, accept=(), watch=None):
         """Run a command and assert it acknowledged.
 
         Most commands reply ``ok``; a few use a verb of their own, which callers
         pass via ``accept``.
         """
-        reply = self.command(*parts)
+        reply = self.command(*parts, watch=watch)
         if not reply.ok and reply.payload not in accept:
             expected = "/".join(("ok",) + tuple(accept))
             raise VmancerError(
@@ -323,16 +355,16 @@ class ShellClient:
         """Program authors the firmware can enumerate (``programs authors``)."""
         return list(self.command("programs", "authors").json().get("authors", []))
 
-    def enumerate_author(self, author):
+    def enumerate_author(self, author, watch=None):
         """Make ``author`` the active author, returning the device's enumerate reply.
 
-        The command is skipped when the author is already active.
+        The command is skipped when the author is already active. The device
+        rebuilds the list from the card, so the reply is awaited on liveness.
         """
         if author != self._author:
             self._author = None
-            self._enumerated[author] = self.command(
-                "programs", "enumerate", author, timeout=ENUMERATE_TIMEOUT
-            ).json()
+            watch = watch or self.watch(f"enumerating {author}")
+            self._enumerated[author] = self.command("programs", "enumerate", author, watch=watch).json()
             self._author = author
         return self._enumerated[author]
 
@@ -379,40 +411,53 @@ class ShellClient:
         """Load an FPGA program, wait until the device runs it, then settle.
 
         ``name`` is ``Name`` for the ``lzx`` author or ``author/Name``; the author
-        is enumerated first unless already active. ``program load`` can answer
-        before the reconfiguration completes, so :meth:`wait_loaded` follows it.
+        is enumerated first unless already active. The shell gives no reply
+        while it reads the program from the card, and ``program load`` can
+        answer before the reconfiguration completes, so both the reply and
+        :meth:`wait_loaded` are awaited on liveness rather than a deadline.
         """
         author, slash, plain = name.partition("/")
         if not slash:
             author, plain = DEFAULT_AUTHOR, name
+        watch = self.watch(f"loading {name}")
         if author != self._author and (slash or self._authors_or_none() is not None):
-            self.enumerate_author(author)
-        self._ok("program", "load", plain)
-        self.wait_loaded(plain)
+            self.enumerate_author(author, watch)
+        self._ok("program", "load", plain, watch=watch)
+        self.wait_loaded(plain, watch=watch)
         if settle:
             time.sleep(settle)
         return self
 
-    def wait_loaded(self, program=None, timeout=None, sleep=None, clock=time.monotonic):
+    def wait_loaded(self, program=None, watch=None, sleep=None):
         """Poll ``fpga status`` until ``program`` (any when None) runs and ``program info`` answers.
 
-        ``program info`` answering "no program loaded" means the load is still in
-        progress. The wait is bounded by ``timeout``, defaulting to the shell's reply
-        deadline; past it :class:`~pyvmancer.errors.ProgramLoadError` names the last
-        ``fpga status``. Returns that status.
+        The FPGA may keep running the previous program, or sit idle with no
+        program, while it configures; ``program info`` answering "no program
+        loaded" means the same. None of that is a fault, so the wait runs on
+        ``watch`` (a fresh one when None). It fails with
+        :class:`~pyvmancer.errors.ProgramLoadError` only on positive evidence:
+        once ``fpga status`` has moved off the state first seen, it settles on
+        a different program running. Returns the final status.
         """
-        deadline = clock() + (self.timeout if timeout is None else timeout)
+        watch = watch or self.watch(f"loading {program or 'program'}")
+        first, moved = None, False
         while True:
-            status = self.fpga_status()
+            status = self.command("fpga", "status", watch=watch).json()
+            key = fpga_key(status)
+            first = key if first is None else first
+            moved = moved or key != first
             if fpga_running(status, program):
                 try:
-                    self.command("program", "info")
+                    self.command("program", "info", watch=watch)
                     return status
                 except ShellError as err:
                     if err.code != ShellErrorCode.SERVICE_UNAVAILABLE:
                         raise
-            if clock() >= deadline:
-                raise ProgramLoadError(program, status)
+                watch.observe("program info pending", key)
+            elif moved and fpga_running(status):
+                raise ProgramLoadError(program, status, f"did not load: the device runs {key[2]!r} instead")
+            else:
+                watch.observe(f"fpga {key[0]}", key)
             (sleep or time.sleep)(LOAD_POLL_S)
 
     def program_info(self):
@@ -469,10 +514,11 @@ class ShellClient:
         return self.command("program", "presets", "get", int(index), PresetBank(bank).value).json()
 
     def apply_preset(self, index, bank=None):
-        """Apply a preset by ``(index, bank)`` or by name when ``bank`` is None."""
+        """Apply a preset by ``(index, bank)`` or by name when ``bank`` is None, awaited on liveness."""
+        watch = self.watch(f"applying preset {index}")
         if bank is None:
-            return self._ok("program", "presets", "apply", index)
-        return self._ok("program", "presets", "apply", int(index), PresetBank(bank).value)
+            return self._ok("program", "presets", "apply", index, watch=watch)
+        return self._ok("program", "presets", "apply", int(index), PresetBank(bank).value, watch=watch)
 
     def save_preset(self, index, name, **fields):
         """Save a user preset, optionally overriding modulation fields.
@@ -611,12 +657,17 @@ class ShellClient:
         return self._ok("settings", "set", int(key_id), value)
 
     def reset_settings(self):
-        """Restore factory settings."""
-        return self._ok("settings", "reset")
+        """Restore factory settings, awaited on liveness since the device rewrites its store."""
+        return self._ok("settings", "reset", watch=self.watch("resetting settings"))
 
     def import_settings(self, settings):
-        """Atomically import a settings dict."""
-        return self._ok("settings", "import", json.dumps(settings, separators=(",", ":")))
+        """Atomically import a settings dict, awaited on liveness since the device rewrites its store."""
+        payload = json.dumps(settings, separators=(",", ":"))
+        return self._ok("settings", "import", payload, watch=self.watch("importing settings"))
+
+    def export_settings(self):
+        """Write every setting to the card; returns the reply naming its ``path`` and ``count``."""
+        return self.command("settings", "export", watch=self.watch("exporting settings")).json()
 
     def transport_status(self):
         """Transport state, BPM and field counter."""
@@ -712,21 +763,15 @@ class ShellClient:
         except (VmancerError, ValueError, TypeError):
             return decoded_limit(READ_CHUNK)
 
-    def hash_timeout(self, size):
-        """Deadline for hashing ``size`` bytes, from the measured device throughput."""
-        return max(self.timeout, HASH_TIMEOUT_FACTOR * int(size) / HASH_BYTES_PER_SECOND)
-
-    def hash_file(self, path, timeout=None):
+    def hash_file(self, path):
         """Device-computed ``{"hash": <sha256 hex>, "size": n}`` for a file.
 
         Advertised as ``fs_hash`` in ``fs caps``; the digest is the natural cache
-        key for anything derived from a program binary. ``timeout`` defaults to a
-        deadline derived from the file's size, since hashing is far from instant.
+        key for anything derived from a program binary. Hashing runs at card
+        speed, so the reply is awaited on liveness.
         """
         target = _check_path(path)
-        if timeout is None:
-            timeout = self.hash_timeout(self.stat(target).get("size", 0))
-        return self.command("fs", "hash", target, timeout=timeout).json()
+        return self.command("fs", "hash", target, watch=self.watch(f"hashing {target}")).json()
 
     def program_manifest(self, path=MANIFEST_PATH):
         """Parsed program library manifest, covering SD-installed programs only."""
@@ -751,10 +796,6 @@ class ShellClient:
             written_count(reply, len(part), f"fs write {target}")
         return self
 
-    def put_timeout(self, size):
-        """Deadline for streaming ``size`` bytes, from the measured device throughput."""
-        return max(self.timeout, PUT_TIMEOUT_FACTOR * int(size) / PUT_BYTES_PER_SECOND)
-
     def put_max_bytes(self):
         """Largest payload one ``fs put`` accepts, as ``fs caps`` reports it."""
         try:
@@ -762,7 +803,7 @@ class ShellClient:
         except (VmancerError, ValueError, TypeError):
             return PUT_MAX_BYTES
 
-    def put_file(self, path, data, chunk=PUT_CHUNK, timeout=None):
+    def put_file(self, path, data, chunk=PUT_CHUNK):
         """Upload a whole file with ``fs put``, the raw streaming path.
 
         ``fs put <path> <size>`` answers ``{"put": "ready"}`` and the device then
@@ -776,23 +817,21 @@ class ShellClient:
         that abandons the transfer strands it consuming commands as payload,
         recoverable only by feeding the promised byte count or power cycling.
         Abandoning it is therefore what has to be avoided. The device stalls
-        while it commits to the card -- past two seconds when a program-sized
-        payload lands in a directory already holding the library -- so the
-        transports allow :data:`~pyvmancer.transports.serial_tty.WRITE_TIMEOUT`
-        for a blocked write rather than treating a stall as failure.
+        while it commits to the card, so the handshake, the payload and the
+        final reply are all awaited on liveness rather than a deadline.
         """
         target = _check_path(path)
         payload = bytes(data)
         limit = self.put_max_bytes()
         if len(payload) > limit:
             raise ValueError(f"payload of {len(payload)} bytes exceeds the device limit of {limit}")
-        deadline = self.put_timeout(len(payload)) if timeout is None else timeout
-        state = self.command("fs", "put", target, len(payload), timeout=deadline).json()
+        watch = self.watch(f"putting {target}")
+        state = self.command("fs", "put", target, len(payload), watch=watch).json()
         if state.get("put") != "ready":
             raise VmancerError(f"fs put {target}: device did not report ready: {state!r}")
         for offset in range(0, len(payload), chunk):
             self._transport.write(payload[offset : offset + chunk])
-        reply = self._await_reply(f"fs put {target}", deadline)
+        reply = self._await_reply(f"fs put {target}", self.timeout, watch)
         written_count(reply, len(payload), f"fs put {target}")
         return self
 

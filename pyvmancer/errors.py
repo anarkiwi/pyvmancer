@@ -43,14 +43,33 @@ class ShellTimeoutError(ShellError):
         super().__init__(None, f"no response within {timeout}s", command)
 
 
-class ProgramLoadError(VmancerError):
-    """A program load never reached a running, configured FPGA."""
+class DeviceGoneError(TransportError):
+    """The device left USB while an operation was waiting on it."""
 
-    def __init__(self, program, status):
+    def __init__(self, what, state):
+        self.what = what
+        self.state = state
+        super().__init__(f"device left USB while {what} ({state})")
+
+
+class StallError(VmancerError):
+    """Opt-in stall guard: nothing observable changed for ``stall`` seconds while waiting on the device."""
+
+    def __init__(self, what, state, stall):
+        self.what = what
+        self.state = state
+        self.stall = stall
+        super().__init__(f"nothing changed for {stall}s while {what} ({state})")
+
+
+class ProgramLoadError(VmancerError):
+    """A program load ended on something other than the requested program running."""
+
+    def __init__(self, program, status, reason="did not finish loading"):
         self.program = program
         self.status = status
         fields = ", ".join(f"{key} {status.get(key)}" for key in ("state", "configured", "program"))
-        super().__init__(f"{program or 'program'} did not finish loading; last fpga status: {fields}")
+        super().__init__(f"{program or 'program'} {reason}; last fpga status: {fields}")
 
 
 class VideoTimingIgnored(VmancerError):
