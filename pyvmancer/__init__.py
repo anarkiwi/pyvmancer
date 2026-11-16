@@ -1,6 +1,7 @@
 """Automate the LZX Industries Videomancer over USB MIDI and USB serial."""
 
 from .const import (
+    ASSIGN_SINK_CCS,
     CROSSFADER_PARAM,
     EMBEDDED_PROGRAMS,
     OPERATORS,
@@ -22,8 +23,26 @@ from .const import (
     param_kind,
     resolve_operator,
 )
+from .ccmap import (
+    CcMapAssignment,
+    CcMapReport,
+    assign_cc_map,
+    cc_map_report,
+    expected_cc_map,
+    reassert_cc_map,
+    sink_cc,
+    verify_cc_map,
+)
 from .device import ProgramParameter, Videomancer, open_midi, open_shell
-from .diagnose import Finding, diagnose, diagnose_latency, diagnose_midi, diagnose_video
+from .diagnose import (
+    Finding,
+    diagnose,
+    diagnose_cc_map,
+    diagnose_cc_probe,
+    diagnose_latency,
+    diagnose_midi,
+    diagnose_video,
+)
 from .discovery import DeviceInfo, find_device, find_devices
 from .errors import (
     DeviceNotFoundError,
@@ -33,6 +52,7 @@ from .errors import (
     TransportError,
     TransportUnavailableError,
     VideoTimingIgnored,
+    CcMapError,
     VmancerError,
 )
 from .firmware import (
@@ -46,7 +66,7 @@ from .firmware import (
     upgrade,
     version_key,
 )
-from .latency import LatencyReport, RateResult, measure_latency
+from .latency import CcProbeReport, LatencyReport, RateResult, measure_latency, probe_cc_map
 from .library import (
     LIBRARY_PRODUCT,
     LibraryEntry,
@@ -64,7 +84,12 @@ from .video import VideoStatus, frame_period
 __version__ = VERSION
 
 __all__ = [
+    "ASSIGN_SINK_CCS",
     "CROSSFADER_PARAM",
+    "CcMapAssignment",
+    "CcMapError",
+    "CcMapReport",
+    "CcProbeReport",
     "DeviceInfo",
     "DeviceNotFoundError",
     "EMBEDDED_PROGRAMS",
@@ -88,10 +113,10 @@ __all__ = [
     "PARK_REFERENCE",
     "ParamKind",
     "ParamRole",
+    "PresetBank",
     "ProgramEntry",
     "ProgramManifest",
     "ProgramParameter",
-    "PresetBank",
     "RateResult",
     "Release",
     "Reply",
@@ -108,13 +133,18 @@ __all__ = [
     "Videomancer",
     "VmancerError",
     "__version__",
+    "assign_cc_map",
+    "cc_map_report",
     "classify_param",
     "diagnose",
+    "diagnose_cc_map",
+    "diagnose_cc_probe",
     "diagnose_latency",
     "diagnose_midi",
     "diagnose_video",
     "download_library",
     "encode_preset",
+    "expected_cc_map",
     "find_device",
     "find_devices",
     "frame_period",
@@ -128,9 +158,13 @@ __all__ = [
     "open_shell",
     "param_kind",
     "parse_line",
+    "probe_cc_map",
+    "reassert_cc_map",
     "resolve_library",
     "resolve_operator",
     "resolve_release",
+    "sink_cc",
     "upgrade",
+    "verify_cc_map",
     "version_key",
 ]

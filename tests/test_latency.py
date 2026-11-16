@@ -8,9 +8,9 @@ import numpy as np
 import pytest
 
 from pyvmancer.const import PARAM_COUNT, PARAM_MAX
-from pyvmancer.diagnose import diagnose_latency, diagnose_midi
+from pyvmancer.diagnose import diagnose_cc_probe, diagnose_latency, diagnose_midi
 from pyvmancer.errors import VmancerError
-from pyvmancer.latency import LatencyReport, RateResult, measure_latency
+from pyvmancer.latency import LatencyReport, RateResult, measure_latency, probe_cc_map
 from pyvmancer.video import VideoStatus, frame_period
 
 FRAME = 1 / 30
@@ -19,7 +19,9 @@ FRAME = 1 / 30
 class FakeRig:
     """A device applying each CC at the first frame after ``delay``, at most ``cap`` messages per second."""
 
-    def __init__(self, delay=0.0, cap=None, rtt=0.002, timing="1080p30", manual=0, offset=0, sources=None):
+    def __init__(
+        self, delay=0.0, cap=None, rtt=0.002, timing="1080p30", manual=0, offset=0, sources=None, routes=None
+    ):
         self.now, self.delay, self.cap, self.rtt = 0.0, delay, cap, rtt
         self.sources = sources or [0] * PARAM_COUNT
         self.period = frame_period(timing) or FRAME
@@ -28,6 +30,7 @@ class FakeRig:
         self.offsets = np.full(PARAM_COUNT, offset, dtype=np.int64)
         self.midi = SimpleNamespace(high_resolution=True)
         self.queue, self.free, self.sent = [], 0.0, 0
+        self.routes = list(range(PARAM_COUNT)) if routes is None else list(routes)
 
     @property
     def shell(self):
@@ -48,8 +51,8 @@ class FakeRig:
             for _ in range(2):
                 self.free = max(self.now, self.free) + (1 / self.cap if self.cap else 0.0)
                 self.sent += 1
-            ready = self.free + self.delay
-            self.queue.append((math.ceil(ready / self.period) * self.period, param - 1, value))
+            due = math.ceil((self.free + self.delay) / self.period) * self.period
+            self.queue += [(due, slot, value) for slot, cc in enumerate(self.routes) if cc == param - 1]
 
     def combined_values(self):
         """Apply every CC whose frame has come, then report ``manual + offset``."""
@@ -59,6 +62,10 @@ class FakeRig:
         for _, index, value in due:
             self.offsets[index] = value
         return np.clip(self.manual + self.offsets, 0, PARAM_MAX)
+
+    def set_modulation(self, index, manual):
+        """Serial manual write, absolute and immediate."""
+        self.manual[index] = manual
 
     def program_state(self):
         """Stored manual values and modulation sources."""
@@ -230,3 +237,41 @@ def test_manual_values_raise_when_absent(shell, byte_transport):
     byte_transport.on("program state", "{}")
     with pytest.raises(VmancerError, match="no 12-slot manual values"):
         shell.manual_values()
+
+
+def _probe(rig, **kwargs):
+    return probe_cc_map(rig, clock=rig.clock, sleep=rig.sleep, **{"timeout": 0.2, **kwargs})
+
+
+def test_probe_passes_and_restores_manuals_and_offsets():
+    """A correct map moves only the written slot; manual values and CC offsets come back."""
+    rig = FakeRig(manual=PARAM_MAX, offset=0)
+    rig.manual[:6] = 300
+    rig.offsets[:6] = 100
+    notes = []
+    probe = _probe(rig, report=notes.append)
+    assert probe.ok and probe.restored and len(notes) == PARAM_COUNT
+    finding = diagnose_cc_probe(probe)
+    assert finding.ok and finding.detail == "each of P1..P12 moved only itself"
+    assert rig.manual[:6].tolist() == [300] * 6 and rig.manual[6:].tolist() == [PARAM_MAX] * 6
+    assert rig.combined_values()[:6].tolist() == [400] * 6
+    assert json.loads(json.dumps(probe.as_dict()))["moved"]["12"] == [12]
+
+
+def test_probe_names_shared_and_unassigned_slots():
+    """The observed corrupt map: P7 and P10 follow P1's CC, and P12 follows nothing."""
+    routes = [0, 1, 2, 3, 4, 5, 0, 7, 8, 0, 10, None]
+    probe = _probe(FakeRig(routes=routes))
+    assert not probe.ok
+    assert probe.moved[0] == (1, 7, 10) and probe.moved[6] == () and probe.moved[11] == ()
+    finding = diagnose_cc_probe(probe)
+    assert "P1 CC moved P1, P7, P10" in finding.detail and "P12 CC moved nothing" in finding.detail
+    assert "--restore --yes" in finding.fix
+
+
+def test_probe_refuses_modulated_slots_before_writing():
+    """Any modulation source makes the probe ambiguous, so nothing is written."""
+    rig = FakeRig(sources=[0] * (PARAM_COUNT - 1) + [1])
+    with pytest.raises(VmancerError, match="modulation sources"):
+        _probe(rig)
+    assert rig.sent == 0

@@ -33,11 +33,12 @@ def test_set_param_low_resolution_emits_single_cc(midi_transport):
     assert midi_transport.data == bytes([CC_STATUS, 0, 95])
 
 
-def test_high_resolution_skips_lsb_when_it_would_exceed_cc_range(midi, midi_transport):
-    """An MSB controller above 95 has no room for its +32 LSB partner."""
-    midi.assign_cc(1, 100)
+@pytest.mark.parametrize("cc", [32, 64, 100])
+def test_high_resolution_pairs_only_msb_below_32(midi, midi_transport, cc):
+    """An MSB controller at 32 or above has no LSB partner, so it is sent 7-bit."""
+    midi.assign_cc(1, cc)
     midi.set_param(1, 1.0)
-    assert midi_transport.data == bytes([CC_STATUS, 100, 127])
+    assert midi_transport.data == bytes([CC_STATUS, cc, 127]) and midi.resolution(1) == 7
 
 
 @pytest.mark.parametrize("param", range(7, 12))
@@ -292,3 +293,14 @@ def test_transport_name_defaults_to_class_name(midi_transport):
     assert midi_transport.name == "FakeMidiTransport"
     with midi_transport as entered:
         assert entered is midi_transport
+
+
+def test_assign_cc_rejects_lsb_partner_clashes(midi):
+    """In 14-bit mode an MSB 0..31 owns MSB + 32, in both directions; 7-bit mode and MSB >= 32 do not."""
+    with pytest.raises(VmancerError, match="is already the LSB partner of parameter 1"):
+        midi.assign_cc(2, 32)
+    midi.assign_cc(1, 44)
+    with pytest.raises(VmancerError, match="has LSB partner 44, already assigned to parameter 1"):
+        midi.assign_cc(2, 12)
+    midi.assign_cc(2, 72)
+    MidiController(None, high_resolution=False).assign_cc(2, 32)

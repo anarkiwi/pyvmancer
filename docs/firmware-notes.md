@@ -50,6 +50,56 @@ does not wrap `settings export`; use `settings get <key_id>` for individual keys
 - **`settings export` and `fs read` keep the USB link up**, unlike `rc.37` below.
   Settings keys are numeric only.
 
+## CC map
+
+Observed on `1.0.1`.
+
+- **Encoding.** `modulation cc-map` lists one `{"msb", "lsb", "auto"}` pair per
+  slot, or `null` when unassigned. Settings keys 200-211 (P1-P12) persist the map:
+  each holds `0x1FF00 | msb`, or `0x1FFFF` unassigned, e.g. `130816` for CC 0 and
+  `130827` for CC 11, read as `{"key":211,"type":"uint32","value":130827}`. Key 199
+  answers `setting not found`. An MSB of 0-31 reports `lsb: msb + 32`; an MSB of 32
+  or above (50, 96 and 191 were tried) reports `lsb: 255`, i.e. 7-bit only.
+  `modulation cc-map` takes no arguments; the settings keys are the only remote
+  write path. `assign_cc_map` refuses to write when any key falls outside this
+  encoding, since other firmware may encode differently.
+- **Same-value writes are ignored, and the keys can disagree with the live map.**
+  With key 209 holding `130825` while the live map had P10 on CC 0, `settings set
+  209 130825` answered `ok` and changed nothing; writing `131071` and then
+  `130825` put P10 back on CC 9/41. `assign_cc_map` therefore clears and then sets
+  every key, and verifies against `modulation cc-map`, never against the keys.
+- **A corrupted map mis-drives every take silently.** Renders came out as plain
+  passthrough with P7 and P10 on CC 0 (driven by every P1 write) and P12 (Mix)
+  unassigned; in other sessions P9 and P12 were on CC 0. `vmancer doctor` reports
+  it as `midi.cc_map`; `vmancer cc-map --restore --yes` repairs it.
+- **A link-dropped program load arms MIDI Assign.** MIDI Assign is meant to be
+  armed only by a long press on a modulator button, which then learns the next CC.
+  After a program load with the source HDMI link powered down for the load
+  (syncsummoner `Session.load_program(..., link=...)`), one slot intermittently
+  learned the first CC sent afterwards, park's CC 0, with no button touched:
+  - without any countermeasure, 4 captures (P10 once, P12 three times, after Pulp
+    and Passthru loads) in 22 link-dropped loads of Pulp, Passthru, Pinwheel and
+    Sabattier; never in bare loads, preset recalls, program changes, note
+    triggers, CC ramps up to 80 sets/s, `measure_latency`, modulation source
+    changes, `modulation reset`/`latch` or a bare link drop and restore;
+  - the map read back unchanged after the load and after the state settled, and
+    changed only with the first CC; the settings key did not change;
+  - a sink CC sent right after `program load`, with the link still down, did not
+    help (1 capture in 5 loads), so the arming comes later;
+  - with an undefined CC (119) sent immediately before park's first CC, 34 loads
+    of the same programs gave 2 captures of CC 119 (P10, after Pulp and after
+    Passthru) and none of a driven CC;
+  - `status`, `remote status`, `modulation status` and `transport status` expose no
+    assign or UI state, and `1.0.1` has no UI-injection command (`ui inject` with
+    button and encoder events appears in `1.0.2-rc.4`, behind developer mode).
+- **Countermeasure.** `Videomancer` sends the first of `ASSIGN_SINK_CCS` (119 down
+  to 102, controllers the MIDI spec leaves undefined below the channel-mode range)
+  that the map does not use, after every load and preset recall and as the first
+  write of `park`, so an armed slot learns the sink rather than a driven CC. Each
+  load and recall then rewrites all 12 keys and verifies; `park` reassigns a sink
+  capture, recording it in `assign_events`, and raises `CcMapError` on any other
+  change. Callers driving a pass should `verify_cc_map()` at its end.
+
 ## Error codes are tagged
 
 Documented codes are 1-10. This firmware returns them as `0x58000000 | n`, so a

@@ -5,7 +5,9 @@ import json
 
 import pytest
 
-from pyvmancer.midi import MidiController
+from pyvmancer.ccmap import encode_setting
+from pyvmancer.const import CC_MAP_SETTING_KEY, CC_MAP_UNASSIGNED, CC_MSB_MASK, DEFAULT_CC_MSB
+from pyvmancer.midi import MidiController, lsb_partner
 from pyvmancer.shell import ShellClient, decoded_limit
 from pyvmancer.transports.base import ByteTransport, MidiTransport
 
@@ -30,6 +32,53 @@ def script_file(byte_transport, path, data, payload_max=256, chunk=None):
 def error_line(code, message):
     """Render a ``!code:message`` failure line."""
     return f"!{code}:{message}"
+
+
+class FakeCcMap:
+    """A device CC map whose live slots and settings keys can disagree; rewriting a key's value is ignored."""
+
+    def __init__(self, live=DEFAULT_CC_MSB, keys=None):
+        self.live = list(live)
+        self.keys = [encode_setting(m) for m in live] if keys is None else list(keys)
+        self.writes = []
+
+    def cc_map(self):
+        """``modulation cc-map`` as parsed JSON."""
+        return {
+            "assignments": [
+                None if m is None else {"msb": m, "lsb": lsb_partner(m) or 255, "auto": True}
+                for m in self.live
+            ]
+        }
+
+    def get_setting(self, key):
+        """``settings get`` payload."""
+        return json.dumps({"key": key, "type": "uint32", "value": self.keys[key - CC_MAP_SETTING_KEY]})
+
+    def set_setting(self, key, value):
+        """``settings set``: applies to the live slot only when the stored value changes."""
+        self.writes.append((key, value))
+        slot = key - CC_MAP_SETTING_KEY
+        if value != self.keys[slot]:
+            self.keys[slot] = value
+            self.live[slot] = None if value == CC_MAP_UNASSIGNED else value & CC_MSB_MASK
+        return self
+
+    def handle(self, command):
+        """Payload for a CC-map or settings command line, or ``None`` for any other."""
+        words = command.split(" ")
+        if words == ["modulation", "cc-map"]:
+            return json.dumps(self.cc_map())
+        if words[0] != "settings" or len(words) < 3 or not words[2].isdigit():
+            return None
+        if not 0 <= int(words[2]) - CC_MAP_SETTING_KEY < len(self.keys):
+            return None
+        if words[1] == "get":
+            return self.get_setting(int(words[2]))
+        if words[1] == "set":
+            self.set_setting(int(words[2]), int(words[3]))
+            return "ok"
+        return None
 
 
 class FakeMidiTransport(MidiTransport):
@@ -83,6 +132,7 @@ class FakeByteTransport(ByteTransport):
         self.author_lists = {}
         self._author = None
         self._pending = bytearray()
+        self.cc = FakeCcMap()
 
     def on(self, command, payload, tag=None):
         """Script an ``@tag:payload`` reply for an exact command line."""
@@ -119,6 +169,9 @@ class FakeByteTransport(ByteTransport):
         if command == "programs list" and self._author in self.author_lists:
             self.on(command, self.author_lists[self._author])
         lines = self.scripts.get(command)
+        payload = self.cc.handle(command) if lines is None else None
+        if payload is not None:
+            lines = [reply_line(command.split(" ")[0], payload)]
         if lines is None:
             if self.default_payload is None:
                 return b""

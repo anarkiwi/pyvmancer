@@ -4,8 +4,11 @@ import json
 
 import pytest
 
+from pyvmancer.const import DEFAULT_CC_MSB
 from pyvmancer.diagnose import Finding, diagnose, diagnose_video, format_finding, report
 from pyvmancer.video import VideoStatus
+
+from .conftest import FakeCcMap
 
 GOOD = {
     "source": "hdmi",
@@ -151,10 +154,11 @@ def test_checks_without_inputs_are_skipped(data, expected):
     assert list(_by_check(data)) == expected
 
 
-class FakeShell:
-    """The three reads ``diagnose`` makes, answered from fixtures."""
+class FakeShell(FakeCcMap):
+    """The reads ``diagnose`` makes, answered from fixtures."""
 
-    def __init__(self, fpga, video):
+    def __init__(self, fpga, video, live=DEFAULT_CC_MSB):
+        super().__init__(live)
         self.fpga, self.video = fpga, video
 
     def version(self):
@@ -180,7 +184,8 @@ def test_diagnose_runs_device_checks_first():
         Finding("firmware.version", True, "1.0.1"),
         Finding("fpga.running", True, "state running, configured True, program Passthru"),
     ]
-    assert len(findings) == 6
+    assert findings[2].check == "midi.cc_map" and findings[2].ok
+    assert len(findings) == 7
 
 
 @pytest.mark.parametrize(
@@ -194,7 +199,7 @@ def test_fpga_not_running(fpga):
 
 def test_fpga_without_state_is_skipped():
     """An ``fpga status`` lacking ``state`` contributes no finding."""
-    assert [f.check for f in diagnose(FakeShell({}, {}))] == ["firmware.version"]
+    assert [f.check for f in diagnose(FakeShell({}, {}))] == ["firmware.version", "midi.cc_map"]
 
 
 def test_report_and_format():

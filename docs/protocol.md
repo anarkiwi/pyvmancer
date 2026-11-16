@@ -62,11 +62,13 @@ pipeline. Default MIDI channel is Omni; `SYSTEM > Midi Channel` narrows it.
 | P7-P11 | 6-10 | 38-42 |
 | P12 | 11 | 43 |
 
-The LSB controller is always MSB + 32, giving optional 14-bit resolution.
-Confirmed against `modulation cc-map`, which reports these as `auto` pairings.
-Assignments are made on the device by long-pressing a modulator button; there is
-no remote-assign MIDI message, so `MidiController.assign_cc` only mirrors an
-assignment already made on the hardware.
+An MSB controller 0-31 pairs with an LSB at MSB + 32, giving optional 14-bit
+resolution; `modulation cc-map` reports these as `auto` pairings, and an MSB of 32
+or above with `lsb: 255` (7-bit). Assignments are made on the device by
+long-pressing a modulator button (MIDI Assign: the next CC received is learned).
+There is no remote-assign MIDI message, but settings keys 200-211 carry the map
+over serial; see [firmware-notes.md](firmware-notes.md#cc-map). pyvmancer writes
+the controller's map to them on every load.
 
 ### Notes
 

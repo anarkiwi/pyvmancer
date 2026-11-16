@@ -5,6 +5,42 @@ All notable changes to this project are documented here. The format follows
 [semantic](https://semver.org/), with the 0.x caveat that the public API may
 still move between minor releases.
 
+## [0.6.1] - 2026-11-16
+
+Patch: the device's MIDI CC map is checked and assigned, because a learned
+assignment on the unit silently mis-drives every CC write.
+
+### Added
+
+- `pyvmancer.ccmap`: `cc_map_report(shell, midi=None)` returning a `CcMapReport`
+  (`expected`, `actual`, `mismatched`, `shared`, `unassigned`, `armed`, `ok`);
+  `assign_cc_map(shell, midi=None, apply=True)` returning a `CcMapAssignment`,
+  which writes every slot of the controller's map through settings keys 200-211
+  (cleared, then set) and raises `CcMapError` unless `modulation cc-map` then
+  matches, refusing to write when any key is outside the observed encoding;
+  `verify_cc_map` (read-only, raises on any difference); `reassert_cc_map`
+  (repairs only a capture of the sink CC); `expected_cc_map`; `sink_cc`.
+- `ASSIGN_SINK_CCS`: undefined controllers 119..102. `Videomancer` sends the first
+  one the map leaves free after each load and preset recall, and first in `park`,
+  so a MIDI Assign armed without a button press learns it rather than a slot's CC.
+- `Videomancer.load_program`, `apply_preset`, `select_preset` re-read the program
+  and assign the CC map; `park` reasserts it afterwards. `Videomancer.cc_assignment`
+  keeps the last assignment and `assign_events` every armed MIDI Assign detected
+  (`time`, `program`, `phase`, `params`); each assignment logs one line on
+  `pyvmancer.device`, e.g. `cc-map: assigned P1..P12 -> CC0..11 (was: ok)`.
+- `diagnose(shell, midi=None)` adds `midi.cc_map`; `diagnose_cc_map(report)`.
+- `latency.probe_cc_map(device)` returning a `CcProbeReport`: writes each slot's CC
+  alone over MIDI and records which slots read back moved, restoring manual values
+  and CC offsets; `diagnose_cc_probe(report)` gives `midi.cc_probe`.
+- `MidiController.control_change(cc, value=0)` and `midi.lsb_partner(cc)`.
+- `vmancer cc-map [--restore [--yes] | --probe]`; `vmancer load` goes through
+  `Videomancer.load_program`, so it assigns the map too.
+
+### Changed
+
+- 14-bit pairing is MSB 0..31 only, as the device reports; MSB 32..95 now sends
+  7-bit instead of an LSB the device does not listen on.
+
 ## [0.6.0] - 2026-11-15
 
 Minor bump: a MIDI CC write to readback latency diagnostic, so whether the

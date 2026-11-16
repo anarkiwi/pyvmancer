@@ -6,12 +6,21 @@ import os
 import sys
 
 from . import __version__, firmware, library
-from .diagnose import diagnose, diagnose_latency, diagnose_video, format_finding, report
+from .ccmap import assign_cc_map, cc_map_report
+from .diagnose import (
+    diagnose,
+    diagnose_cc_map,
+    diagnose_cc_probe,
+    diagnose_latency,
+    diagnose_video,
+    format_finding,
+    report,
+)
 from .const import OPERATORS, PARAM_COUNT
 from .device import Videomancer, open_midi, open_shell
 from .discovery import find_devices
 from .errors import VmancerError
-from .latency import DEFAULT_RATES, measure_latency
+from .latency import DEFAULT_RATES, measure_latency, probe_cc_map
 
 
 def _param_value(text):
@@ -78,7 +87,7 @@ def build_parser():
     sub.add_parser("authors", help="list program authors over serial")
     sub.add_parser("presets", help="list factory and user presets over serial")
 
-    load = sub.add_parser("load", help="load an FPGA program by name or author/Name over serial")
+    load = sub.add_parser("load", help="load an FPGA program by name or author/Name, then assign the CC map")
     load.add_argument("name")
 
     sub.add_parser("manifest", help="show the SD program manifest over serial")
@@ -94,6 +103,18 @@ def build_parser():
     _add_latency_args(doctor)
     latency = sub.add_parser("latency", help="measure MIDI CC write to readback latency and backlog")
     _add_latency_args(latency)
+
+    cc_map = sub.add_parser("cc-map", help="compare the device MIDI CC map with the CCs pyvmancer sends")
+    mode = cc_map.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--restore", action="store_true", help="write every slot's CC via settings keys and verify"
+    )
+    mode.add_argument(
+        "--probe",
+        action="store_true",
+        help="write each CC over MIDI and check only its slot moves (restores)",
+    )
+    cc_map.add_argument("--yes", action="store_true", help="actually --restore; otherwise this is a dry run")
 
     shell_cmd = sub.add_parser("shell", help="run a raw serial shell command")
     shell_cmd.add_argument("--timeout", type=float, help="reply deadline in seconds (default: 5)")
@@ -209,8 +230,6 @@ def _run_shell(args):
             _print_json(shell.authors())
         elif args.command == "presets":
             _print_json(shell.presets())
-        elif args.command == "load":
-            shell.load_program(args.name)
         elif args.command == "manifest":
             manifest = shell.program_manifest()
             _print_json({"version": manifest.version, "programs": manifest.raw.get("programs", [])})
@@ -245,8 +264,36 @@ def _run_device(args):
         )
         findings = diagnose_latency(latency)
         if args.command == "doctor":
-            findings = diagnose(device.shell) + findings
+            findings = diagnose(device.shell, device.midi) + findings
         return _report(findings, latency=latency.as_dict())
+
+
+def _run_cc_map(args):
+    """Handle ``cc-map``: compare, ``--restore`` (dry run unless ``--yes``) or ``--probe``."""
+    if args.probe:
+        with Videomancer.open(serial_number=args.serial_number, channel=args.channel) as device:
+            probe = probe_cc_map(device, report=_note)
+        return _report([diagnose_cc_probe(probe)], probe=probe.as_dict())
+    with open_shell(serial_number=args.serial_number) as shell:
+        if args.restore:
+            assigned = assign_cc_map(shell, apply=args.yes)
+            _note(assigned.summary())
+            _print_json(
+                {**assigned.as_dict(), **({} if args.yes else {"action": "re-run with --yes to write"})}
+            )
+            return 0
+        found = cc_map_report(shell)
+    if found is None:
+        raise VmancerError("device reported no 12-slot CC map")
+    return _report([diagnose_cc_map(found)], **found.as_dict())
+
+
+def _run_load(args):
+    """Load a program through the facade, so the CC map is assigned afterwards."""
+    with Videomancer.open(serial_number=args.serial_number, channel=args.channel) as device:
+        device.load_program(args.name)
+        _note(device.cc_assignment.summary())
+    return 0
 
 
 def _run_video(args, shell):
@@ -432,6 +479,8 @@ HANDLERS = {
     "trigger": _run_midi,
     "preset": _run_midi,
     "clock": _run_midi,
+    "cc-map": _run_cc_map,
+    "load": _run_load,
     "doctor": _run_device,
     "latency": _run_device,
 }

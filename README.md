@@ -52,7 +52,8 @@ d.program_manifest().get("combing").description
 d.file_hash("sd:/programs/lzx/combing.vmprog")
 d.video_state().source_locked      # per-input lock, not the genlock flag
 d.resync()                         # bounce the timing to re-init the output raster
-vm.diagnose(d.shell)               # [Finding(check, ok, detail, fix), ...]
+vm.diagnose(d.shell, d.midi)       # [Finding(check, ok, detail, fix), ...], incl. midi.cc_map
+d.verify_cc_map()                  # raise CcMapError if the device map moved; loads assign it
 vm.diagnose_latency(vm.measure_latency(d))   # midi.latency, midi.backlog; restores what it wrote
 ```
 
@@ -83,6 +84,9 @@ vmancer resync                  # recover an output that stopped passing frames
 vmancer doctor                  # named checks with fixes; JSON on stdout, exit 1 on any failure
 vmancer doctor --latency        # also midi.latency and midi.backlog (writes, then restores P1)
 vmancer latency --param 1 --rates 5,10,20,40,80 --seconds 2   # CC write to readback timing
+vmancer cc-map                  # device MIDI CC map against the CCs pyvmancer sends; exit 1 on mismatch
+vmancer cc-map --restore --yes  # write every slot's CC via settings and verify (dry run without --yes)
+vmancer cc-map --probe          # write each CC over MIDI, check only its slot moves (restores)
 vmancer video status            # raw video status plus diagnostic findings
 vmancer video timings           # timing standards the firmware accepts
 vmancer video timing 1080p30    # set the output timing and confirm it took
