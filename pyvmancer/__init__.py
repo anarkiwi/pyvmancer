@@ -47,6 +47,7 @@ from .discovery import DeviceInfo, find_device, find_devices
 from .errors import (
     DeviceNotFoundError,
     FirmwareError,
+    ProgramLoadError,
     ShellError,
     ShellTimeoutError,
     TransportError,
@@ -115,6 +116,7 @@ __all__ = [
     "ParamRole",
     "PresetBank",
     "ProgramEntry",
+    "ProgramLoadError",
     "ProgramManifest",
     "ProgramParameter",
     "RateResult",

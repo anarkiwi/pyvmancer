@@ -47,6 +47,15 @@ does not wrap `settings export`; use `settings get <key_id>` for individual keys
   `alternate`.
 - **`program load` can exceed the 5 s shell timeout** while still succeeding; use
   `vmancer shell --timeout`.
+- **`program load` is asynchronous.** Its `ok` can arrive before the FPGA
+  reconfiguration completes, so an immediate `program info` answers `[3] no program
+  loaded`. Seen when an archive run loaded Passthru twice in succession: the second
+  load's `program info` failed, while the device ran Passthru normally moments later. `fpga status` reports `state`,
+  `configured` and `program`; `ShellClient.load_program` polls it until the requested
+  program is `running` and `configured` and `program info` answers, bounded by the
+  shell's reply deadline, and raises `ProgramLoadError` naming the last status
+  otherwise. Preset recalls (`Videomancer.apply_preset`, `select_preset`) wait the same
+  way before the CC map is assigned.
 - **`settings export` and `fs read` keep the USB link up**, unlike `rc.37` below.
   Settings keys are numeric only.
 

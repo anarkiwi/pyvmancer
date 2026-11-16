@@ -20,10 +20,11 @@ from .const import (
     SHELL_PATH_PREFIX,
     LogLevel,
     PresetBank,
+    ShellErrorCode,
     TransportState,
     resolve_operator,
 )
-from .errors import ShellError, ShellTimeoutError, VideoTimingIgnored, VmancerError
+from .errors import ProgramLoadError, ShellError, ShellTimeoutError, VideoTimingIgnored, VmancerError
 from .programs import MANIFEST_PATH, ProgramManifest
 from .video import VideoStatus, parse_timings
 
@@ -57,11 +58,26 @@ PUT_TIMEOUT_FACTOR = 4.0
 PUT_MAX_BYTES = 8 << 20
 #: Entries one ``fs ls`` page returns.
 LS_PAGE = 5
+#: Pause between ``fpga status`` polls while a load completes; it paces serial traffic only.
+LOAD_POLL_S = 0.05
 
 
 def decoded_limit(payload_max):
     """Decoded bytes that fit in a base64 payload of ``payload_max`` characters."""
     return max(3, int(payload_max) // 4 * 3)
+
+
+def fpga_running(status, program=None):
+    """True when ``fpga status`` shows ``program`` (any when None) configured and running.
+
+    Fields a firmware omits do not block, leaving ``program info`` to decide.
+    """
+    name = status.get("program", program)
+    return (
+        status.get("state", "running") == "running"
+        and bool(status.get("configured", True))
+        and (program is None or str(name).casefold() == program.casefold())
+    )
 
 
 def _pick(data, keys):
@@ -360,10 +376,11 @@ class ShellClient:
         return names
 
     def load_program(self, name, settle=1.5):
-        """Load an FPGA program and wait for the load to settle.
+        """Load an FPGA program, wait until the device runs it, then settle.
 
         ``name`` is ``Name`` for the ``lzx`` author or ``author/Name``; the author
-        is enumerated first unless already active.
+        is enumerated first unless already active. ``program load`` can answer
+        before the reconfiguration completes, so :meth:`wait_loaded` follows it.
         """
         author, slash, plain = name.partition("/")
         if not slash:
@@ -371,9 +388,32 @@ class ShellClient:
         if author != self._author and (slash or self._authors_or_none() is not None):
             self.enumerate_author(author)
         self._ok("program", "load", plain)
+        self.wait_loaded(plain)
         if settle:
             time.sleep(settle)
         return self
+
+    def wait_loaded(self, program=None, timeout=None, sleep=None, clock=time.monotonic):
+        """Poll ``fpga status`` until ``program`` (any when None) runs and ``program info`` answers.
+
+        ``program info`` answering "no program loaded" means the load is still in
+        progress. The wait is bounded by ``timeout``, defaulting to the shell's reply
+        deadline; past it :class:`~pyvmancer.errors.ProgramLoadError` names the last
+        ``fpga status``. Returns that status.
+        """
+        deadline = clock() + (self.timeout if timeout is None else timeout)
+        while True:
+            status = self.fpga_status()
+            if fpga_running(status, program):
+                try:
+                    self.command("program", "info")
+                    return status
+                except ShellError as err:
+                    if err.code != ShellErrorCode.SERVICE_UNAVAILABLE:
+                        raise
+            if clock() >= deadline:
+                raise ProgramLoadError(program, status)
+            (sleep or time.sleep)(LOAD_POLL_S)
 
     def program_info(self):
         """Current program's name, id and its 12 parameter names with min/max."""

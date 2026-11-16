@@ -43,6 +43,16 @@ class ShellTimeoutError(ShellError):
         super().__init__(None, f"no response within {timeout}s", command)
 
 
+class ProgramLoadError(VmancerError):
+    """A program load never reached a running, configured FPGA."""
+
+    def __init__(self, program, status):
+        self.program = program
+        self.status = status
+        fields = ", ".join(f"{key} {status.get(key)}" for key in ("state", "configured", "program"))
+        super().__init__(f"{program or 'program'} did not finish loading; last fpga status: {fields}")
+
+
 class VideoTimingIgnored(VmancerError):
     """``video timing`` acknowledged a standard the output did not take."""
 

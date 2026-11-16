@@ -219,7 +219,8 @@ def test_load_program_rereads_parameters_and_assigns_cc_map(vm, fakes, caplog):
     written = fakes[1].written
     assert (
         written.index("program load perlin")
-        < written.index("program info", 1)
+        < written.index("fpga status")
+        < written.index("program info", 2)
         < written.index("settings set 200 131071")
     )
     assert fakes[1].cc.writes == [
@@ -227,9 +228,20 @@ def test_load_program_rereads_parameters_and_assigns_cc_map(vm, fakes, caplog):
     ]
     assert written[-1] == "modulation cc-map"
     vm.parameters()
-    assert written.count("program info") == 2
+    assert written.count("program info") == 3
     assert "cc-map: assigned P1..P12 -> CC0..11 (was: ok)" in caplog.text
     assert vm.cc_assignment.after.ok
+
+
+def test_load_program_reads_parameters_only_once_the_device_runs_it(vm, fakes, monkeypatch):
+    """A device still answering "no program loaded" after ``program load`` is waited on, not read."""
+    monkeypatch.setattr("pyvmancer.shell.time.sleep", lambda _: None)
+    fakes[1].on_error("programs authors", 1, "unknown command")
+    fakes[1].queue("fpga status", fakes[1].fpga("configuring", False, "Perlin"))
+    fakes[1].queue("program info", "!3:no program loaded", "!3:no program loaded")
+    vm.load_program("perlin", settle=0)
+    assert fakes[1].written.count("fpga status") == 4
+    assert vm.parameter("Levels").index == 0 and vm.cc_assignment.after.ok
 
 
 def test_load_program_raises_when_the_map_does_not_take(vm, fakes):
@@ -272,9 +284,11 @@ def test_park_raises_when_a_driven_cc_was_captured(vm, fakes):
 def test_preset_recall_assigns_cc_map(vm, fakes):
     """Both preset paths reassign the map; a MIDI-only facade only sends the program change."""
     vm.apply_preset(1, "factory")
-    assert "program presets apply 1 factory" in fakes[1].written and len(fakes[1].cc.writes) == 24
+    written = fakes[1].written
+    assert written.index("program presets apply 1 factory") < written.index("fpga status")
+    assert len(fakes[1].cc.writes) == 24
     vm.select_preset(2)
-    assert len(fakes[1].cc.writes) == 48
+    assert written.count("fpga status") == 2 and len(fakes[1].cc.writes) == 48
     Videomancer(midi=MidiController(fakes[0])).select_preset(3)
     assert fakes[0].data.endswith(bytes([0xC0, 3]))
 
