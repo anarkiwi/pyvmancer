@@ -82,10 +82,10 @@ def coerce_value(value, boolean=False):
     """Coerce a scalar user value to device units.
 
     Accepts ``bool`` (toggle), ``float`` in ``0.0..1.0`` (normalised) or ``int``
-    (already device units). ``boolean`` forces truthiness interpretation.
+    (already device units). ``boolean`` snaps a number to the toggle state the
+    firmware reads it as, on at or above :data:`~pyvmancer.const.BOOL_THRESHOLD`.
     """
-    if boolean or isinstance(value, (bool, np.bool_)):
+    if isinstance(value, (bool, np.bool_)):
         return int(from_bool(bool(value)))
-    if isinstance(value, (float, np.floating)):
-        return int(to_device(value))
-    return int(clamp(int(value)))
+    device = to_device(value) if isinstance(value, (float, np.floating)) else clamp(int(value))
+    return int(from_bool(as_bool(device))) if boolean else int(device)

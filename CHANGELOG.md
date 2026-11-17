@@ -44,6 +44,12 @@ API as listed below.
   `CcMapReport.armed` (and `"armed"` in its `as_dict()`) and
   `Videomancer.assign_events`.
 
+### Fixed
+
+- A toggle write snaps a number to the state the firmware reads: on at or above 512
+  (device units, or 0.5 normalised). Values 1–511 were sent as on, and the firmware
+  reads them as off.
+
 ## [0.6.5] - 2026-11-16
 
 Patch: one command at a time. The shell blocks on work the device starts itself,

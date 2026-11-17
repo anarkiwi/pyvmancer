@@ -42,9 +42,12 @@ def test_high_resolution_pairs_only_msb_below_32(midi, midi_transport, cc):
 
 
 @pytest.mark.parametrize("param", range(7, 12))
-@pytest.mark.parametrize("value,expected", [(0.4, 1023), (0.0, 0), (True, 1023), (False, 0), (7, 1023)])
+@pytest.mark.parametrize(
+    "value,expected",
+    [(0.4, 0), (0.5, 1023), (0.0, 0), (True, 1023), (False, 0), (7, 0), (511, 0), (512, 1023)],
+)
 def test_toggle_params_coerce_to_extremes(midi, param, value, expected):
-    """Slots 7-11 are toggles, so any truthy value snaps to full scale."""
+    """Slots 7-11 are toggles, so a number snaps to the state the firmware reads at 512."""
     midi.set_param(param, value)
     assert midi.get_param(param) == expected
 
