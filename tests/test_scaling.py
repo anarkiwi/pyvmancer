@@ -104,13 +104,17 @@ def test_as_bool_and_from_bool_vectorise():
         (-5, False, PARAM_MIN),
         (5000, False, PARAM_MAX),
         (0, True, PARAM_MIN),
-        (1, True, PARAM_MAX),
-        (0.4, True, PARAM_MAX),
+        (1, True, PARAM_MIN),
+        (511, True, PARAM_MIN),
+        (512, True, PARAM_MAX),
+        (0.4, True, PARAM_MIN),
+        (0.5, True, PARAM_MAX),
         (0.0, True, PARAM_MIN),
+        (True, True, PARAM_MAX),
     ],
 )
 def test_coerce_value(value, boolean, expected):
-    """Coercion dispatches on type, and ``boolean`` forces truthiness."""
+    """Coercion dispatches on type, and ``boolean`` snaps numbers at the firmware threshold."""
     result = scaling.coerce_value(value, boolean=boolean)
     assert isinstance(result, int)
     assert result == expected

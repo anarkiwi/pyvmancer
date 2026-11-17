@@ -5,6 +5,51 @@ All notable changes to this project are documented here. The format follows
 [semantic](https://semver.org/), with the 0.x caveat that the public API may
 still move between minor releases.
 
+## [Unreleased]
+
+Parameters are typed only by the program's own `.vmprog` declaration, and the
+MIDI Assign sink CC is gone: CC 119 is a MIDI reset on the Videomancer, and
+firmware `1.0.2-rc.4` opens MIDI Assign only on a held P switch. Breaks the 0.6
+API as listed below.
+
+### Added
+
+- `pyvmancer.vmprog`: `read_vmprog` (path or bytes) returns a `VmprogConfig`
+  (program id, version, core, name, author, `declarations`, `presets`, supported
+  timings, program type, processing delay) from a package's BLAKE2b-256-verified
+  config section, per the SDK's `vmprog_format.hpp`. `ParamDecl` per declared
+  slot with `levels` and `type`; `ParamType` (`UNUSED`, `BOOLEAN`, `QUANTIZED`,
+  `CONTINUOUS`, `UNDECLARED`); `ControlMode`; `Preset`.
+- `ProgramParameter(..., config=None)`, `type`, `levels`, `declaration`;
+  `Videomancer.config`, `load_program(..., config=None)`,
+  `parameters(..., config=None)`, raising when the config names another program.
+- `CcMapReport.changed`, `CcMapAssignment.changes()` and `"changes"` in its
+  `as_dict()`: each differing slot's expected, before and after CCs.
+- `Videomancer.cc_map_changes`: every assignment that found slots differing.
+
+### Changed
+
+- `PARK_REFERENCE` is zero on every slot.
+- `reassert_cc_map` and `park` reassign any differing CC map and record what
+  they saw, instead of repairing only a sink capture and raising otherwise.
+- `select_preset`, `apply_preset`, `load_program` and `park` send no extra CC.
+
+### Removed
+
+- `CROSSFADER_PARAM`, `ProgramParameter.crossfader`, `UNASSIGNED_NAMES`,
+  `is_unassigned`, `ParamRole`, `classify_param`, `ProgramParameter.role`,
+  `steps`, `assigned`, and the `sweep_steps` arguments of `ProgramParameter` and
+  `Videomancer.parameters`: no slot is typed by its number, name or range.
+- `ASSIGN_SINK_CCS`, `sink_cc`, `sink_cc_of`, `Videomancer.consume_midi_assign`,
+  `CcMapReport.armed` (and `"armed"` in its `as_dict()`) and
+  `Videomancer.assign_events`.
+
+### Fixed
+
+- A toggle write snaps a number to the state the firmware reads: on at or above 512
+  (device units, or 0.5 normalised). Values 1–511 were sent as on, and the firmware
+  reads them as off.
+
 ## [0.6.5] - 2026-11-16
 
 Patch: one command at a time. The shell blocks on work the device starts itself,

@@ -28,27 +28,32 @@ it. `modulation set <slot 0-11> <manual> [time] [space] [slope]` over serial is
 absolute; a CC never is. See [firmware-notes.md](firmware-notes.md) for what
 that means for repeatable automation, and `Videomancer.park`.
 
-P12 is the crossfader and gates the output even in programs whose `program info`
-names it `Null 12`, so parking it at zero blacks the device out. The default
-`pyvmancer.const.PARK_REFERENCE` therefore zeroes P1-P11 and leaves P12 open.
+`pyvmancer.const.PARK_REFERENCE` zeroes every slot. No slot has a role that holds
+across programs: what P12 does is the loaded program's choice (Quilt's P12 is
+Density, for example).
 
 ### Program parameters
 
 Each loaded program names its own twelve parameters and declares a native range
 for each; `program info` reports `{"name","id","parameters":[{"name","min","max"}]}`.
 `pyvmancer.device.ProgramParameter` maps those native units linearly onto
-`0..1023` and classifies the range into a `pyvmancer.const.ParamRole`:
+`0..1023`. What a slot *is* comes only from the program's own declaration, the
+config section of its `.vmprog` package, read by `pyvmancer.read_vmprog` (layout per
+the Videomancer SDK's `vmprog_format.hpp`; the section's BLAKE2b-256 digest is
+checked). Each parameter config is keyed by its `parameter_id` (1-12) and typed as
+a `pyvmancer.ParamType`:
 
-| Declared range | Role | Sampling |
+| Declaration | Type | Sampling |
 | --- | --- | --- |
-| `0..1` | boolean | two states, on at combined `>= 512` |
-| integer, no wider than the sweep resolution | quantised | one point per native position, `max-min+1` of them |
+| no config with that `parameter_id` | unused | not sampled |
+| `control_mode` boolean, or exactly 2 value labels | boolean | two states |
+| N > 2 value labels | quantised, N levels | one point per level |
+| `control_mode` `steps_4`..`steps_256` | quantised, 4..256 levels | one point per level |
 | anything else | continuous | the caller's sweep resolution |
-| named `-` or `Null <n>` | unassigned | not sampled |
 
-`Posterize 0..7` has 8 positions; sampling it at 32 steps wastes device time.
-The enumerable/sweepable boundary is the caller's own resolution, so it is the
-`sweep_steps` argument to `classify_param` and `Videomancer.parameters`.
+Pass the config to `Videomancer.load_program(name, config=...)` or
+`Videomancer.parameters(config=...)`. Without one every slot is `undeclared`:
+nothing is inferred from a slot's name or range.
 
 ## MIDI
 
@@ -66,7 +71,7 @@ pipeline. Default MIDI channel is Omni; `SYSTEM > Midi Channel` narrows it.
 An MSB controller 0-31 pairs with an LSB at MSB + 32, giving optional 14-bit
 resolution; `modulation cc-map` reports these as `auto` pairings, and an MSB of 32
 or above with `lsb: 255` (7-bit). Assignments are made on the device by
-long-pressing a modulator button (MIDI Assign: the next CC received is learned).
+holding a modulator's P switch (MIDI Assign: the next CC received is learned).
 There is no remote-assign MIDI message, but settings keys 200-211 carry the map
 over serial; see [firmware-notes.md](firmware-notes.md#cc-map). pyvmancer writes
 the controller's map to them on every load.

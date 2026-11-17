@@ -6,25 +6,15 @@ import time
 import numpy as np
 
 from . import scaling
-from .const import (
-    CROSSFADER_PARAM,
-    PARAM_COUNT,
-    PARAM_MAX,
-    PARAM_MIN,
-    PARK_REFERENCE,
-    SWEEP_STEPS,
-    USB_PID,
-    USB_VID,
-    ParamRole,
-    classify_param,
-)
-from .ccmap import assign_cc_map, reassert_cc_map, sink_cc, verify_cc_map
+from .const import PARAM_COUNT, PARAM_MAX, PARAM_MIN, PARK_REFERENCE, SWEEP_STEPS, USB_PID, USB_VID
+from .ccmap import assign_cc_map, reassert_cc_map, verify_cc_map
 from .discovery import find_device
 from .errors import DeviceNotFoundError, PortBusyError, TransportUnavailableError, VmancerError
 from .midi import MidiController
 from .scaling import MIDI_7BIT_MAX
 from .shell import ShellClient
 from .transports.rawmidi import RawMidiTransport
+from .vmprog import ParamType
 
 LOG = logging.getLogger(__name__)
 
@@ -114,16 +104,21 @@ def open_shell(serial_number=None, port=None, prefer="auto", **client):
 
 
 class ProgramParameter:
-    """One named parameter of the loaded program, with its native range and role."""
+    """One parameter slot of the loaded program: its native range and, when known, its declaration.
 
-    __slots__ = ("index", "name", "minimum", "maximum", "role", "steps")
+    ``config`` is the program's :class:`~pyvmancer.vmprog.VmprogConfig`; without one the slot's
+    :attr:`type` is ``UNDECLARED`` and nothing about it is inferred from its name or range.
+    """
 
-    def __init__(self, index, name, minimum, maximum, sweep_steps=SWEEP_STEPS):
+    __slots__ = ("index", "name", "minimum", "maximum", "type", "declaration")
+
+    def __init__(self, index, name, minimum, maximum, config=None):
         self.index = index
         self.name = name
         self.minimum = minimum
         self.maximum = maximum
-        self.role, self.steps = classify_param(name, minimum, maximum, sweep_steps)
+        self.declaration = None if config is None else config.declaration(index + 1)
+        self.type = ParamType.UNDECLARED if config is None else config.param_type(index + 1)
 
     @property
     def param(self):
@@ -131,28 +126,19 @@ class ProgramParameter:
         return self.index + 1
 
     @property
-    def assigned(self):
-        """False when the program leaves this slot unassigned."""
-        return self.role is not ParamRole.UNASSIGNED
-
-    @property
-    def crossfader(self):
-        """True for P12, which gates the output whatever the program names it."""
-        return self.param == CROSSFADER_PARAM
+    def levels(self):
+        """Distinct positions the declaration gives the slot, or ``None`` when continuous or undeclared."""
+        return None if self.declaration is None else self.declaration.levels
 
     def as_bool(self, value):
         """Resolve a combined device value as this parameter's on/off state."""
         return bool(scaling.as_bool(value))
 
     def sample_values(self, steps=SWEEP_STEPS):
-        """Device values worth visiting, honouring the role.
-
-        A boolean yields its two states and a quantised range one value per
-        native position; sampling either at ``steps`` points wastes device time.
-        """
-        if self.role is ParamRole.UNASSIGNED:
+        """Device values worth visiting: one per declared level, else ``steps``; none for an unused slot."""
+        if self.type is ParamType.UNUSED:
             return np.empty(0, dtype=np.int64)
-        count = self.steps or steps
+        count = self.levels or steps
         return np.rint(np.linspace(PARAM_MIN, PARAM_MAX, count)).astype(np.int64)
 
     def to_device(self, value):
@@ -188,8 +174,9 @@ class Videomancer:
         self.info = info
         self._parameters = None
         self.program = None
+        self.config = None
         self.cc_assignment = None
-        self.assign_events = []
+        self.cc_map_changes = []
 
     @classmethod
     def open(cls, serial_number=None, midi=True, shell=True, channel=None, high_resolution=True):
@@ -262,41 +249,36 @@ class Videomancer:
         self.midi.select_preset(program)
         if self.has_shell:
             self.shell.wait_loaded()
-            self.consume_midi_assign()
             self.assign_cc_map("preset")
         return self
 
     def apply_preset(self, index, bank=None):
         """Apply a preset over serial, wait until the device runs it, then assign the CC map."""
         self.shell.apply_preset(index, bank).wait_loaded()
-        self.consume_midi_assign()
         return self.assign_cc_map("preset")
 
-    def load_program(self, name, settle=1.5):
-        """Load ``Name`` or ``author/Name``; once it runs, read its parameters and assign the CC map."""
+    def load_program(self, name, settle=1.5, config=None):
+        """Load ``Name`` or ``author/Name``; once it runs, read its parameters and assign the CC map.
+
+        ``config`` is the program's :class:`~pyvmancer.vmprog.VmprogConfig`, typing its parameters.
+        """
         result = self.shell.load_program(name, settle=settle)
-        self.program = name
-        self.consume_midi_assign()
+        self.program, self.config = name, config
         self.parameters(refresh=True)
         self.assign_cc_map("load")
         return result
 
-    def consume_midi_assign(self):
-        """Send the sink CC, so a MIDI Assign armed without a button press captures it, not a slot's CC."""
-        if self.has_midi:
-            self.midi.control_change(sink_cc(self._midi))
-
     def _record(self, assignment, phase):
-        """Keep and log an assignment; an armed MIDI Assign also goes to :attr:`assign_events`."""
+        """Keep and log an assignment; one that found slots differing also goes to :attr:`cc_map_changes`."""
         self.cc_assignment = assignment
         LOG.info(assignment.summary())
-        if assignment.before.armed:
-            self.assign_events.append(
+        if assignment.before.changed:
+            self.cc_map_changes.append(
                 {
                     "time": time.time(),
                     "program": self.program,
                     "phase": phase,
-                    "params": assignment.before.armed,
+                    "changes": assignment.changes(),
                 }
             )
         return assignment
@@ -306,7 +288,7 @@ class Videomancer:
         return self._record(assign_cc_map(self.shell, self._midi), phase)
 
     def reassert_cc_map(self, phase="park"):
-        """Verify the map, reassigning only a sink-CC capture; any other change raises ``CcMapError``."""
+        """Verify the map and reassign any slot that differs, recording what was observed."""
         assignment = reassert_cc_map(self.shell, self._midi)
         return assignment if assignment is None else self._record(assignment, phase)
 
@@ -314,19 +296,23 @@ class Videomancer:
         """Raise :class:`~pyvmancer.errors.CcMapError` unless the device map still matches the controller."""
         return verify_cc_map(self.shell, self._midi)
 
-    def parameters(self, refresh=False, sweep_steps=SWEEP_STEPS):
+    def parameters(self, refresh=False, config=None):
         """Named parameters of the loaded program, indexed by name (serial only).
 
-        The device reports each parameter's native range, e.g. ``Posterize``
-        ``0..7``; values map linearly onto ``0..1023`` and each range is
-        classified into a :class:`~pyvmancer.const.ParamRole`.
+        ``program info`` gives each slot's name and native range; ``config``, a
+        :class:`~pyvmancer.vmprog.VmprogConfig` for the same program, declares what each slot is.
         """
-        if self._parameters is None or refresh:
+        if self._parameters is None or refresh or config is not None:
             info = self.shell.program_info()
+            config = self.config if config is None else config
+            running = info.get("name")
+            if config is not None and running and running.casefold() != config.name.casefold():
+                raise VmancerError(f"config declares {config.name!r} but {running!r} is loaded")
             self._parameters = {
-                entry["name"]: ProgramParameter(index, entry["name"], entry["min"], entry["max"], sweep_steps)
+                entry["name"]: ProgramParameter(index, entry["name"], entry["min"], entry["max"], config)
                 for index, entry in enumerate(info.get("parameters", []))
             }
+            self.config = config
         return self._parameters
 
     def parameter(self, name):
@@ -369,8 +355,8 @@ class Videomancer:
 
         Writes are paced at ``rate_hz`` because an unpaced burst drops the LSB of
         14-bit CC pairs, and the readback settles first because serial and MIDI
-        are asynchronous. The sink CC goes first, and a capture of it is then reassigned;
-        any other CC-map change raises. Returns the verified combined values.
+        are asynchronous. A CC map found changed afterwards is reassigned and recorded.
+        Returns the verified combined values.
         """
         reference = scaling.clamp(values)
         if reference.shape != (PARAM_COUNT,):
@@ -378,7 +364,6 @@ class Videomancer:
         if rate_hz <= 0:
             raise ValueError(f"rate_hz must be positive, got {rate_hz}")
         pace = (2 if self.midi.high_resolution else 1) / rate_hz
-        self.consume_midi_assign()
         for index, value in enumerate(reference):
             self.midi.set_param(index + 1, 0)
             self.shell.set_modulation(index, int(value))

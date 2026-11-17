@@ -47,7 +47,8 @@ Device knowledge the library encodes, rather than leaving to each caller:
 
 ```python
 d.park()                           # manual values to a reference, so a CC is absolute
-p = d.parameter("Posterize")       # p.role, p.steps, p.sample_values()
+d.load_program("Quilt", config=vm.read_vmprog("quilt.vmprog"))  # the .vmprog declares each slot
+p = d.parameter("Density")         # p.type, p.levels, p.sample_values(); UNDECLARED without a config
 d.program_manifest().get("combing").description
 d.file_hash("sd:/programs/lzx/combing.vmprog")
 d.video_state().source_locked      # per-input lock, not the genlock flag

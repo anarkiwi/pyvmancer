@@ -9,7 +9,6 @@ from collections import defaultdict
 from typing import NamedTuple
 
 from .const import (
-    ASSIGN_SINK_CCS,
     CC_MAP_ASSIGNED,
     CC_MAX,
     CC_MSB_MASK,
@@ -31,22 +30,6 @@ def expected_cc_map(midi=None):
         (int(msb), lsb_partner(int(msb)) if midi.resolution(param) == 14 else None)
         for param, msb in zip(PARAMS, midi.cc_map)
     )
-
-
-def sink_cc(midi=None):
-    """The first of ``ASSIGN_SINK_CCS`` that ``midi`` never sends, MSB or LSB."""
-    return sink_cc_of(expected_cc_map(midi))
-
-
-def sink_cc_of(expected):
-    """The first of ``ASSIGN_SINK_CCS`` outside an expected ``(msb, lsb)`` map."""
-    sent = {cc for pair in expected for cc in pair if cc is not None}
-    free = [cc for cc in ASSIGN_SINK_CCS if cc not in sent]
-    if not free:
-        raise ValueError(
-            f"the CC map uses every undefined controller {ASSIGN_SINK_CCS}; none is free to sink"
-        )
-    return free[0]
 
 
 def parse_cc_map(raw):
@@ -118,32 +101,35 @@ class CcMapReport(NamedTuple):
         )
 
     @property
-    def armed(self):
-        """Params that captured the sink CC: MIDI Assign was armed on them."""
-        sink = sink_cc_of(self.expected)
-        return tuple(p for p, slot in zip(PARAMS, self.actual) if slot is not None and slot[0] == sink)
+    def changed(self):
+        """Params on a CC other than expected, without one, or sharing one: every slot that differs."""
+        return tuple(sorted(set(self.wrong) | set(self.shared)))
 
     def summary(self):
         """One line naming what each wrong or shared slot was on, e.g. ``P12 CC0``, or ``ok``."""
-        slots = sorted(set(self.wrong) | set(self.shared))
-        return ", ".join(f"P{p} {_name(self.actual[p - 1])}" for p in slots) or "ok"
+        return ", ".join(f"P{p} {_name(self.actual[p - 1])}" for p in self.changed) or "ok"
 
     def as_dict(self):
         """JSON-ready comparison."""
         return {
             "ok": self.ok,
-            "expected": [{"msb": msb, "lsb": lsb} for msb, lsb in self.expected],
-            "actual": [None if s is None else {"msb": s[0], "lsb": s[1]} for s in self.actual],
+            "expected": [_slot(s) for s in self.expected],
+            "actual": [_slot(s) for s in self.actual],
             "mismatched": list(self.mismatched),
             "shared": {str(p): list(o) for p, o in self.shared.items()},
             "unassigned": list(self.unassigned),
-            "armed": list(self.armed),
+            "changed": list(self.changed),
         }
 
 
 def _name(slot):
     """``CC<msb>``, or ``unassigned``."""
     return "unassigned" if slot is None else f"CC{slot[0]}"
+
+
+def _slot(slot):
+    """``{"msb", "lsb"}``, or ``None`` for an unassigned slot."""
+    return None if slot is None else {"msb": slot[0], "lsb": slot[1]}
 
 
 def _span(values):
@@ -196,9 +182,19 @@ class CcMapAssignment(NamedTuple):
         """One log line, e.g. ``cc-map: assigned P1..P12 -> CC0..11 (was: P12 CC0)``."""
         msbs = [msb for msb, _ in self.before.expected]
         verb = "assigned" if self.after is not None else "would assign"
-        armed = self.before.armed
-        note = f"; MIDI Assign was armed on P{', P'.join(map(str, armed))}" if armed else ""
-        return f"cc-map: {verb} P1..P{len(msbs)} -> CC{_span(msbs)} (was: {self.before.summary()}){note}"
+        return f"cc-map: {verb} P1..P{len(msbs)} -> CC{_span(msbs)} (was: {self.before.summary()})"
+
+    def changes(self):
+        """``{param: {"expected", "before", "after"}}`` ``(msb, lsb)`` slots for each param that differed."""
+        after = None if self.after is None else self.after.actual
+        return {
+            p: {
+                "expected": self.before.expected[p - 1],
+                "before": self.before.actual[p - 1],
+                "after": None if after is None else after[p - 1],
+            }
+            for p in self.before.changed
+        }
 
     def as_dict(self):
         """JSON-ready summary."""
@@ -206,6 +202,7 @@ class CcMapAssignment(NamedTuple):
             "dry_run": self.after is None,
             "summary": self.summary(),
             "before": self.before.as_dict(),
+            "changes": {str(p): {k: _slot(v) for k, v in c.items()} for p, c in self.changes().items()},
             "writes": [{"key": k, "old": old, "new": new} for k, old, new in self.writes],
             "commands": [
                 f"settings set {k} {v}" for k, _, new in self.writes for v in (CC_MAP_UNASSIGNED, new)
@@ -223,16 +220,12 @@ def verify_cc_map(shell, midi=None):
 
 
 def reassert_cc_map(shell, midi=None):
-    """Verify the map, reassigning when the only change is the sink CC captured by an armed MIDI Assign.
+    """Verify the map and reassign it when any slot differs from what ``midi`` sends.
 
-    Returns the :class:`CcMapAssignment` when one was needed, else ``None``; any other change raises.
+    Returns the :class:`CcMapAssignment`, whose ``before`` and ``after`` record what was observed,
+    when one was needed, else ``None``.
     """
-    report = _require_report(shell, midi)
-    if report.ok:
-        return None
-    if set(report.wrong) | set(report.shared) != set(report.armed):
-        raise CcMapError(f"device CC map changed ({report.summary()}): {report.as_dict()}")
-    return assign_cc_map(shell, midi)
+    return None if _require_report(shell, midi).ok else assign_cc_map(shell, midi)
 
 
 def assign_cc_map(shell, midi=None, apply=True):

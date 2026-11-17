@@ -16,11 +16,9 @@ from pyvmancer.ccmap import (
     parse_cc_map,
     read_cc_settings,
     reassert_cc_map,
-    sink_cc,
-    sink_cc_of,
     verify_cc_map,
 )
-from pyvmancer.const import ASSIGN_SINK_CCS, CC_MAP_UNASSIGNED, PARAM_COUNT
+from pyvmancer.const import CC_MAP_UNASSIGNED, PARAM_COUNT
 from pyvmancer.diagnose import diagnose_cc_map
 from pyvmancer.errors import CcMapError, VmancerError
 from pyvmancer.latency import CcProbeReport
@@ -215,35 +213,21 @@ def test_cli_probe_reports_the_probe(monkeypatch, capsys):
     assert json.loads(capsys.readouterr().out)["probe"]["ok"]
 
 
-def test_sink_cc_avoids_every_sent_controller():
-    """The sink is the first undefined controller the map leaves free, and none free is an error."""
-    assert sink_cc() == 119
-    midi = MidiController(None, cc_map=[119, 118] + list(range(10)))
-    assert sink_cc(midi) == 117
-    crowded = MidiController(None, cc_map=list(range(108, 120)), high_resolution=False)
-    assert sink_cc(crowded) == 107
-    with pytest.raises(ValueError, match="none is free"):
-        sink_cc_of([(cc, None) for cc in ASSIGN_SINK_CCS])
-
-
-def test_reassert_repairs_only_a_sink_capture():
-    """A slot on the sink CC is reassigned and reported armed; a correct map is left alone."""
+def test_reassert_reassigns_whatever_changed_and_reports_it():
+    """Any slot off its CC is reassigned; the assignment reports each changed slot before and after."""
     device = FakeCcMap()
     assert reassert_cc_map(device) is None and not device.writes
-    device.live[9] = 119
-    assigned = reassert_cc_map(device)
-    assert assigned.before.armed == (10,) and device.live == list(range(PARAM_COUNT))
-    assert assigned.summary().endswith("(was: P10 CC119); MIDI Assign was armed on P10")
-    assert json.loads(json.dumps(assigned.as_dict()))["before"]["armed"] == [10]
-
-
-def test_reassert_raises_on_any_other_change():
-    """A captured driven CC alongside a sink capture still raises, without writing."""
-    device = FakeCcMap()
     device.live[9], device.live[11] = 119, 0
-    with pytest.raises(CcMapError, match="changed"):
-        reassert_cc_map(device)
-    assert not device.writes
+    assigned = reassert_cc_map(device)
+    assert device.live == list(range(PARAM_COUNT)) and assigned.before.changed == (1, 10, 12)
+    assert assigned.summary().endswith("(was: P1 CC0, P10 CC119, P12 CC0)")
+    data = json.loads(json.dumps(assigned.as_dict()))
+    assert data["before"]["changed"] == [1, 10, 12]
+    assert data["changes"]["10"] == {
+        "expected": {"msb": 9, "lsb": 41},
+        "before": {"msb": 119, "lsb": None},
+        "after": {"msb": 9, "lsb": 41},
+    }
 
 
 def test_control_change_sends_one_raw_cc(midi, midi_transport):
