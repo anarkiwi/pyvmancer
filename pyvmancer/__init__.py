@@ -1,8 +1,6 @@
 """Automate the LZX Industries Videomancer over USB MIDI and USB serial."""
 
 from .const import (
-    ASSIGN_SINK_CCS,
-    CROSSFADER_PARAM,
     EMBEDDED_PROGRAMS,
     OPERATORS,
     PARAM_COUNT,
@@ -16,7 +14,6 @@ from .const import (
     Operator,
     OperatorCategory,
     ParamKind,
-    ParamRole,
     ROUTE_HDMI_IN,
     ROUTE_MODES,
     ROUTE_SETTING_KEY,
@@ -27,7 +24,6 @@ from .const import (
     SettingKey,
     ShellErrorCode,
     TransportState,
-    classify_param,
     decode_error_code,
     describe_setting,
     setting_name,
@@ -41,7 +37,6 @@ from .ccmap import (
     cc_map_report,
     expected_cc_map,
     reassert_cc_map,
-    sink_cc,
     verify_cc_map,
 )
 from .device import ProgramParameter, Videomancer, open_midi, open_shell
@@ -100,12 +95,17 @@ from .programs import MANIFEST_PATH, ProgramEntry, ProgramManifest
 from .route import describe_route, parse_route, read_route, route_name
 from .shell import Reply, ShellClient, encode_preset, listing_problems, parse_line, read_setting
 from .video import VideoStatus, frame_period
+from .vmprog import ControlMode, ParamDecl, ParamType, Preset, VmprogConfig, read_vmprog
 
 __version__ = VERSION
 
 __all__ = [
-    "ASSIGN_SINK_CCS",
-    "CROSSFADER_PARAM",
+    "read_vmprog",
+    "VmprogConfig",
+    "Preset",
+    "ParamType",
+    "ParamDecl",
+    "ControlMode",
     "CcMapAssignment",
     "CcMapError",
     "CcMapReport",
@@ -134,7 +134,6 @@ __all__ = [
     "PARAM_MIN",
     "PARK_REFERENCE",
     "ParamKind",
-    "ParamRole",
     "PresetBank",
     "ROUTE_HDMI_IN",
     "ROUTE_MODES",
@@ -173,7 +172,6 @@ __all__ = [
     "__version__",
     "assign_cc_map",
     "cc_map_report",
-    "classify_param",
     "describe_route",
     "diagnose",
     "diagnose_cc_map",
@@ -209,7 +207,6 @@ __all__ = [
     "resolve_operator",
     "resolve_release",
     "route_name",
-    "sink_cc",
     "upgrade",
     "verify_cc_map",
     "version_key",

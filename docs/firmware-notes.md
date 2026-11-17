@@ -88,33 +88,18 @@ Observed on `1.0.1`.
   passthrough with P7 and P10 on CC 0 (driven by every P1 write) and P12 (Mix)
   unassigned; in other sessions P9 and P12 were on CC 0. `vmancer doctor` reports
   it as `midi.cc_map`; `vmancer cc-map --restore --yes` repairs it.
-- **A link-dropped program load arms MIDI Assign.** MIDI Assign is meant to be
-  armed only by a long press on a modulator button, which then learns the next CC.
-  After a program load with the source HDMI link powered down for the load
-  (syncsummoner `Session.load_program(..., link=...)`), one slot intermittently
-  learned the first CC sent afterwards, park's CC 0, with no button touched:
-  - without any countermeasure, 4 captures (P10 once, P12 three times, after Pulp
-    and Passthru loads) in 22 link-dropped loads of Pulp, Passthru, Pinwheel and
-    Sabattier; never in bare loads, preset recalls, program changes, note
-    triggers, CC ramps up to 80 sets/s, `measure_latency`, modulation source
-    changes, `modulation reset`/`latch` or a bare link drop and restore;
-  - the map read back unchanged after the load and after the state settled, and
-    changed only with the first CC; the settings key did not change;
-  - a sink CC sent right after `program load`, with the link still down, did not
-    help (1 capture in 5 loads), so the arming comes later;
-  - with an undefined CC (119) sent immediately before park's first CC, 34 loads
-    of the same programs gave 2 captures of CC 119 (P10, after Pulp and after
-    Passthru) and none of a driven CC;
-  - `status`, `remote status`, `modulation status` and `transport status` expose no
-    assign or UI state, and `1.0.1` has no UI-injection command (`ui inject` with
-    button and encoder events appears in `1.0.2-rc.4`, behind developer mode).
-- **Countermeasure.** `Videomancer` sends the first of `ASSIGN_SINK_CCS` (119 down
-  to 102, controllers the MIDI spec leaves undefined below the channel-mode range)
-  that the map does not use, after every load and preset recall and as the first
-  write of `park`, so an armed slot learns the sink rather than a driven CC. Each
-  load and recall then rewrites all 12 keys and verifies; `park` reassigns a sink
-  capture, recording it in `assign_events`, and raises `CcMapError` on any other
-  change. Callers driving a pass should `verify_cc_map()` at its end.
+- **Slots learned a CC after link-dropped loads.** After a program load with the
+  source HDMI link powered down for the load, one slot intermittently came back on
+  a CC other than its own, with no button touched. Earlier releases sent an
+  undefined controller (119 down to 102) after every load as a "sink" for an armed
+  MIDI Assign; that is withdrawn, because CC 119 is a MIDI reset on the
+  Videomancer, so the sink reset the device each time it was sent.
+- **No software sink is needed.** Firmware `1.0.2-rc.4`'s release notes say "MIDI
+  Assign only opens on a held P switch". `Videomancer` sends no extra CC: each load
+  and recall rewrites all 12 keys and verifies, and `park` reads the map back,
+  reassigns it if any slot differs, and records each changed slot's expected,
+  before and after CCs in `cc_map_changes`, without attributing a cause. Callers
+  driving a pass should `verify_cc_map()` at its end.
 
 ## Two clients on the port corrupt replies
 
@@ -297,10 +282,9 @@ around, both observed on hardware:
   slot written is otherwise sampled before the device has applied it. `park`
   waits, then polls, and only then compares.
 
-The reference itself must leave P12 open: P12 is the crossfader and gates the
-output even in programs whose `program info` names it `Null 12`, so parking it
-at zero blacks the device out entirely and every subsequent measurement is
-degenerate. `pyvmancer.const.PARK_REFERENCE` zeroes P1-P11 and opens P12.
+The reference is zero on every slot, `pyvmancer.const.PARK_REFERENCE`. What a
+slot does, and so whether zero on it darkens the output, is declared per program
+in its `.vmprog` config, never assumed for a slot number.
 
 ## Vid Route Mode is settings key 1
 

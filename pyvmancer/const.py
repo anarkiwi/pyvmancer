@@ -30,9 +30,6 @@ DEFAULT_CC_MSB = tuple(range(PARAM_COUNT))
 CC_LSB_OFFSET = 32
 CC_MIN = 0
 CC_MAX = 127
-#: Controllers the MIDI spec leaves undefined below the channel-mode range (120..127), preferred first.
-#: One is sent after a load so an armed MIDI Assign captures it instead of a CC that drives a slot.
-ASSIGN_SINK_CCS = tuple(range(119, 101, -1))
 
 
 class SettingKey(IntEnum):
@@ -215,52 +212,11 @@ def param_kind(param):
 #: Parameters that render per-scanline when driven by a per-line operator.
 PER_LINE_PARAMS = frozenset({1, 2, 3, 4, 5, 6, 12})
 
-#: P12 is the crossfader and gates the output even where a program leaves it unnamed.
-CROSSFADER_PARAM = 12
+#: Manual reference that makes a MIDI CC absolute: every slot at zero.
+PARK_REFERENCE = (PARAM_MIN,) * PARAM_COUNT
 
-#: Manual reference that makes a MIDI CC absolute: zero, with the crossfader open.
-PARK_REFERENCE = tuple(
-    PARAM_MAX if param == CROSSFADER_PARAM else PARAM_MIN for param in range(1, PARAM_COUNT + 1)
-)
-
-#: Names ``program info`` uses for a slot the program does not assign.
-UNASSIGNED_NAMES = frozenset({"", "-", "null", "none"})
-
-#: Default sweep resolution; a native range no wider than this is enumerable instead.
+#: Default sweep resolution for a parameter with no declared levels.
 SWEEP_STEPS = 32
-
-
-class ParamRole(Enum):
-    """How a program's declared parameter range should be sampled."""
-
-    CONTINUOUS = "continuous"
-    BOOLEAN = "boolean"
-    QUANTIZED = "quantized"
-    UNASSIGNED = "unassigned"
-
-
-def is_unassigned(name):
-    """True when ``program info`` names a slot ``-`` or ``Null <n>``."""
-    text = str(name).strip().lower()
-    return text in UNASSIGNED_NAMES or (text.startswith("null") and text[4:].strip().isdigit())
-
-
-def classify_param(name, minimum, maximum, sweep_steps=SWEEP_STEPS):
-    """Classify one ``program info`` entry as ``(role, steps)``.
-
-    ``0..1`` is a boolean resolving on at :data:`BOOL_THRESHOLD`; an integer
-    range with no more positions than ``sweep_steps`` quantises to exactly those
-    positions; ``steps`` is None where the role does not bound sampling.
-    """
-    low, high = float(minimum), float(maximum)
-    if is_unassigned(name) or high <= low:
-        return ParamRole.UNASSIGNED, None
-    if (low, high) == (0.0, 1.0):
-        return ParamRole.BOOLEAN, 2
-    span = high - low
-    if low.is_integer() and span.is_integer() and span + 1 <= sweep_steps:
-        return ParamRole.QUANTIZED, int(span) + 1
-    return ParamRole.CONTINUOUS, None
 
 
 class Operator(IntEnum):

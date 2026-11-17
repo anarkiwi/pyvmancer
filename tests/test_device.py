@@ -12,20 +12,20 @@ from pyvmancer import device as device_module
 from pyvmancer.const import (
     CC_MAP_UNASSIGNED,
     BOOL_THRESHOLD,
-    CROSSFADER_PARAM,
     PARAM_COUNT,
     PARAM_MAX,
     PARAM_MIN,
     PARK_REFERENCE,
-    ParamRole,
 )
 from pyvmancer.device import PARK_TOLERANCE, ProgramParameter, Videomancer, open_midi, open_shell
 from pyvmancer.errors import CcMapError, DeviceNotFoundError, TransportUnavailableError, VmancerError
 from pyvmancer.midi import MidiController
 from pyvmancer.programs import MANIFEST_PATH
 from pyvmancer.shell import ShellClient
+from pyvmancer.vmprog import ParamType, read_vmprog
 
 from .conftest import FakeByteTransport, FakeMidiTransport, script_file
+from .vmprog_pack import pack_config, pack_vmprog
 
 PROGRAM_INFO = {
     "name": "posterize",
@@ -35,6 +35,26 @@ PROGRAM_INFO = {
         {"name": "Invert", "min": 0, "max": 1},
     ],
 }
+POSTERIZE = read_vmprog(
+    pack_vmprog(
+        pack_config(
+            {"program_id": "org.example.posterize", "program_name": "Posterize"},
+            [
+                {
+                    "parameter_id": "rotary_potentiometer_1",
+                    "name_label": "Levels",
+                    "value_labels": list("01234567"),
+                },
+                {"parameter_id": "rotary_potentiometer_2", "name_label": "Mix", "max_value": 100},
+                {
+                    "parameter_id": "rotary_potentiometer_3",
+                    "name_label": "Invert",
+                    "value_labels": ["Off", "On"],
+                },
+            ],
+        )
+    )
+)
 
 
 @pytest.mark.parametrize("minimum,maximum", [(0, 7), (0, 100), (0, 1), (-5, 5), (1, 1000)])
@@ -82,37 +102,37 @@ def test_program_parameter_repr():
     assert repr(ProgramParameter(2, "Mix", 0, 100)) == "ProgramParameter(P3, 'Mix', 0..100)"
 
 
+@pytest.mark.parametrize("minimum,maximum", [(0, 1), (0, 7), (0, 1023)])
+def test_program_parameter_without_a_declaration_is_undeclared(minimum, maximum):
+    """``program info`` alone types nothing: no slot is classified by its name or range."""
+    for name in ("Invert", "-", "Null 12"):
+        param = ProgramParameter(11, name, minimum, maximum)
+        assert (param.type, param.declaration, param.levels) == (ParamType.UNDECLARED, None, None)
+        assert len(param.sample_values(steps=9)) == 9
+
+
 @pytest.mark.parametrize(
-    "name,minimum,maximum,role,steps",
+    "index,kind,levels,samples",
     [
-        ("Invert", 0, 1, ParamRole.BOOLEAN, 2),
-        ("Posterize", 0, 7, ParamRole.QUANTIZED, 8),
-        ("Mix", 0, 100, ParamRole.CONTINUOUS, None),
-        ("Gain", 0.0, 1.5, ParamRole.CONTINUOUS, None),
-        ("-", 0, 100, ParamRole.UNASSIGNED, None),
-        ("Null 12", 0, 1023, ParamRole.UNASSIGNED, None),
-        ("Levels", 5, 5, ParamRole.UNASSIGNED, None),
+        (0, ParamType.QUANTIZED, 8, 8),
+        (1, ParamType.CONTINUOUS, None, 9),
+        (2, ParamType.BOOLEAN, 2, 2),
+        (11, ParamType.UNUSED, None, 0),
     ],
 )
-def test_program_parameter_roles(name, minimum, maximum, role, steps):
-    """Each declared range classifies by the device's own semantics."""
-    param = ProgramParameter(0, name, minimum, maximum)
-    assert (param.role, param.steps) == (role, steps)
-    assert param.assigned == (role is not ParamRole.UNASSIGNED)
-
-
-def test_program_parameter_sample_values_honour_the_role():
-    """Booleans yield two points and quantised ranges one point per position."""
-    assert ProgramParameter(0, "Invert", 0, 1).sample_values().tolist() == [PARAM_MIN, PARAM_MAX]
-    assert len(ProgramParameter(0, "Posterize", 0, 7).sample_values()) == 8
-    assert len(ProgramParameter(0, "Mix", 0, 100).sample_values(steps=9)) == 9
-    assert ProgramParameter(0, "-", 0, 1).sample_values().size == 0
+def test_program_parameter_types_come_from_the_declaration(index, kind, levels, samples):
+    """The slot's declaration types it and bounds its samples; an undeclared slot is not sampled."""
+    param = ProgramParameter(index, "x", 0, 1023, POSTERIZE)
+    assert (param.type, param.levels) == (kind, levels)
+    assert len(param.sample_values(steps=9)) == samples
+    assert (param.declaration is None) == (kind is ParamType.UNUSED)
 
 
 def test_program_parameter_quantised_steps_land_on_distinct_native_values():
-    """Sampling a quantised range visits every native position exactly once."""
-    param = ProgramParameter(0, "Posterize", 0, 7)
+    """Sampling a quantised slot visits every declared position exactly once."""
+    param = ProgramParameter(0, "Levels", 0, 7, POSTERIZE)
     assert [round(param.from_device(value)) for value in param.sample_values()] == list(range(8))
+    assert ProgramParameter(2, "Invert", 0, 1, POSTERIZE).sample_values().tolist() == [PARAM_MIN, PARAM_MAX]
 
 
 def test_program_parameter_boolean_threshold():
@@ -120,13 +140,6 @@ def test_program_parameter_boolean_threshold():
     param = ProgramParameter(6, "Invert", 0, 1)
     assert param.as_bool(BOOL_THRESHOLD)
     assert not param.as_bool(BOOL_THRESHOLD - 1)
-
-
-def test_program_parameter_crossfader_slot():
-    """P12 is the crossfader whatever the loaded program calls it."""
-    assert ProgramParameter(11, "Null 12", 0, 1023).crossfader
-    assert not ProgramParameter(0, "Levels", 0, 7).crossfader
-    assert ProgramParameter(11, "Null 12", 0, 1023).param == CROSSFADER_PARAM
 
 
 @pytest.fixture(name="fakes")
@@ -257,32 +270,43 @@ def test_load_program_raises_when_the_map_does_not_take(vm, fakes):
         vm.load_program("perlin", settle=0)
 
 
-def test_park_sends_the_sink_cc_first_and_reassigns_its_capture(vm, fakes):
-    """An armed MIDI Assign captures the sink CC park sends first; that capture is reassigned and recorded."""
+def test_park_reassigns_a_changed_map_and_records_what_it_saw(vm, fakes):
+    """A slot found off its CC after park is reassigned; the record holds the observed slots only."""
     fakes[1].on("modulation status", _park_status())
-    fakes[1].cc.live[11] = 119
+    fakes[1].cc.live[11] = 0
     vm.program = "Pulp"
     vm.park(sleep=lambda _: None)
-    assert fakes[0].data.startswith(bytes([0xB0, 119, 0]))
-    assert fakes[1].cc.live == list(range(PARAM_COUNT)) and vm.cc_assignment.before.armed == (12,)
-    assert "MIDI Assign was armed on P12" in vm.cc_assignment.summary()
-    assert [(e["program"], e["phase"], e["params"]) for e in vm.assign_events] == [("Pulp", "park", (12,))]
+    assert fakes[0].data.startswith(bytes([0xB0, 0, 0]))
+    assert fakes[1].cc.live == list(range(PARAM_COUNT)) and vm.cc_assignment.before.changed == (1, 12)
+    assert vm.cc_assignment.summary().endswith("(was: P1 CC0, P12 CC0)")
+    [event] = vm.cc_map_changes
+    assert (event["program"], event["phase"]) == ("Pulp", "park")
+    assert event["changes"][12] == {"expected": (11, 43), "before": (0, 32), "after": (11, 43)}
 
 
 def test_park_leaves_a_correct_map_alone(vm, fakes):
-    """With nothing captured, park only reads the map back."""
+    """With every slot on its CC, park only reads the map back."""
     fakes[1].on("modulation status", _park_status())
     vm.park(sleep=lambda _: None)
-    assert not fakes[1].cc.writes and vm.cc_assignment is None and not vm.assign_events
+    assert not fakes[1].cc.writes and vm.cc_assignment is None and not vm.cc_map_changes
 
 
-def test_park_raises_when_a_driven_cc_was_captured(vm, fakes):
-    """A slot on any CC other than the sink means a real CC was learned; that fails rather than repairs."""
-    fakes[1].on("modulation status", _park_status())
-    fakes[1].cc.live[11] = 0
-    with pytest.raises(CcMapError, match="P1 CC0, P12 CC0"):
-        vm.park(sleep=lambda _: None)
-    assert not fakes[1].cc.writes
+def test_parameters_take_the_programs_declaration(vm, fakes):
+    """A config types the parameters and is dropped by the next load; one for another program raises."""
+    assert vm.parameter("Levels").type is ParamType.UNDECLARED
+    fakes[1].on("program info", json.dumps({**PROGRAM_INFO, "name": "Posterize"}))
+    assert vm.parameters(config=POSTERIZE)["Levels"].levels == 8 and vm.config is POSTERIZE
+    fakes[1].on_error("programs authors", ShellErrorCode.UNKNOWN_COMMAND, "unknown command")
+    vm.load_program("posterize", settle=0)
+    assert vm.config is None and vm.parameter("Invert").type is ParamType.UNDECLARED
+    vm.load_program("posterize", settle=0, config=POSTERIZE)
+    assert vm.parameter("Invert").type is ParamType.BOOLEAN
+    fakes[1].on("program info", json.dumps({**PROGRAM_INFO, "name": "Perlin"}))
+    with pytest.raises(VmancerError, match="declares 'Posterize' but 'Perlin' is loaded"):
+        vm.parameters(refresh=True)
+    with pytest.raises(VmancerError, match="but 'Perlin' is loaded"):
+        vm.parameters(config=POSTERIZE._replace(name="Other"))
+    assert vm.config is POSTERIZE
 
 
 def test_preset_recall_assigns_cc_map(vm, fakes):
@@ -320,7 +344,7 @@ def test_midi_delegation(vm, fakes):
     vm.set_params({12: 0})
     vm.trigger(2, velocity=64)
     vm.select_preset(3)
-    assert fakes[0].data.endswith(bytes([0x90, 1, 64, 0xC0, 3, 0xB0, 119, 0]))
+    assert fakes[0].data.endswith(bytes([0x90, 1, 64, 0xC0, 3]))
 
 
 def test_shell_delegation(vm, fakes):
@@ -347,15 +371,8 @@ def test_park_writes_absolute_manual_values_and_zero_ccs(vm, fakes):
     assert vm.park(sleep=lambda _: None).tolist() == list(PARK_REFERENCE)
     manual = [line for line in fakes[1].written if line.startswith("modulation set")]
     assert manual[0] == "modulation set 0 0"
-    assert manual[-1] == f"modulation set 11 {PARAM_MAX}"
+    assert manual[-1] == "modulation set 11 0"
     assert set(fakes[0].data[2::3]) == {0}
-
-
-def test_park_leaves_the_crossfader_open(vm, fakes):
-    """Parking P12 at zero would black out the device, so the reference opens it."""
-    fakes[1].on("modulation status", _park_status())
-    assert vm.park(sleep=lambda _: None)[CROSSFADER_PARAM - 1] == PARAM_MAX
-    assert f"modulation set 11 {PARAM_MAX}" in fakes[1].written
 
 
 def test_park_paces_writes_and_settles_before_verifying(vm, fakes):
@@ -364,12 +381,12 @@ def test_park_paces_writes_and_settles_before_verifying(vm, fakes):
     sleeps = []
     vm.park(rate_hz=100.0, settle=0.5, sleep=sleeps.append)
     assert sleeps == [2 / 100.0] * PARAM_COUNT + [0.5]
-    assert fakes[1].written.index("modulation status") > fakes[1].written.index("modulation set 11 1023")
+    assert fakes[1].written.index("modulation status") > fakes[1].written.index("modulation set 11 0")
 
 
 def test_park_retries_until_the_readback_settles(vm, monkeypatch):
     """A slot sampled before the device applied it is polled again, not failed."""
-    drifted = np.array(list(PARK_REFERENCE[:-1]) + [0])
+    drifted = np.array(list(PARK_REFERENCE[:-1]) + [PARAM_MAX])
     replies = iter([drifted, np.array(PARK_REFERENCE)])
     monkeypatch.setattr(vm.shell, "combined_values", lambda: next(replies))
     assert vm.park(attempts=2, sleep=lambda _: None).tolist() == list(PARK_REFERENCE)
@@ -377,14 +394,14 @@ def test_park_retries_until_the_readback_settles(vm, monkeypatch):
 
 def test_park_raises_when_values_never_settle(vm, fakes):
     """A reference the device does not reach is an error, not a silent pass."""
-    fakes[1].on("modulation status", _park_status([0] * PARAM_COUNT))
+    fakes[1].on("modulation status", _park_status([PARAM_MAX] * PARAM_COUNT))
     with pytest.raises(VmancerError, match="parked values settled at"):
         vm.park(attempts=2, sleep=lambda _: None)
 
 
 def test_park_tolerance_is_one_cc_step(vm, fakes):
     """Readback slack is one 7-bit CC step, the coarsest a write can quantise to."""
-    near = [PARK_TOLERANCE] * (PARAM_COUNT - 1) + [PARAM_MAX - PARK_TOLERANCE]
+    near = [PARK_TOLERANCE] * PARAM_COUNT
     fakes[1].on("modulation status", _park_status(near))
     assert vm.park(attempts=1, sleep=lambda _: None).tolist() == near
 
