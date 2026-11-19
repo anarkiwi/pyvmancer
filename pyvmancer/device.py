@@ -413,7 +413,7 @@ class Videomancer:
         return self.shell.program_manifest()
 
     def file_hash(self, path):
-        """Device-computed sha256 of a file, as hex (serial only)."""
+        """Device-computed BLAKE2b-256 of a file, as hex (serial only)."""
         return self.shell.hash_file(path)["hash"]
 
     def presets(self):

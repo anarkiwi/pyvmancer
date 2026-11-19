@@ -5,6 +5,25 @@ All notable changes to this project are documented here. The format follows
 [semantic](https://semver.org/), with the 0.x caveat that the public API may
 still move between minor releases.
 
+## [0.6.6] - 2026-11-19
+
+Patch: library installs compare content. `fs hash` answers BLAKE2b-256, which the
+firmware SDK's `vmprog_crypto` names sha256; read as SHA-256 it looked wrong, so
+installs fell back to sizes and skipped programs whose rebuild kept the size.
+
+### Added
+
+- `library.card_digest(data)`: the digest `fs hash` reports.
+- `library.merged_manifest(archived, present)`.
+
+### Fixed
+
+- `install_library` skips a file only when its size and device hash both match,
+  and verifies each upload by hash instead of size.
+- `install_library` merges the archive's manifest into the card's instead of
+  replacing it, so programs installed from elsewhere stay listed.
+- `hash_file`, `device.hash` and `vmancer hash` name the digest BLAKE2b-256.
+
 ## [0.6.5] - 2026-11-16
 
 Patch: one command at a time. The shell blocks on work the device starts itself,

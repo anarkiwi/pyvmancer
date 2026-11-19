@@ -12,6 +12,7 @@ The copy goes over ``fs put``, the shell's raw streaming path. The base64
 """
 
 import hashlib
+import json
 import os
 import posixpath
 import time
@@ -20,6 +21,7 @@ import zipfile
 from .const import SHELL_PATH_PREFIX
 from .errors import FirmwareError, TransportError, VmancerError
 from .firmware import download_asset, fetch_bytes, resolve_release
+from .programs import MANIFEST_PATH
 
 #: Tag prefix selecting program library releases.
 LIBRARY_PRODUCT = "programs"
@@ -157,6 +159,38 @@ def installed_sizes(shell, entries):
     return sizes
 
 
+def card_digest(data):
+    """The digest ``fs hash`` reports for ``data``: BLAKE2b-256, which the firmware SDK calls sha256."""
+    return hashlib.blake2b(bytes(data), digest_size=32).hexdigest()
+
+
+def merged_manifest(archived, present):
+    """The archive's manifest with the card's entries for files it does not ship kept after its own.
+
+    Programs installed from elsewhere stay listed; ``archived`` comes back unchanged when the card
+    lists nothing more, or holds no manifest that parses.
+    """
+    try:
+        kept = json.loads(present).get("programs", []) if present else []
+    except (ValueError, AttributeError):
+        kept = []
+    new = json.loads(archived)
+    shipped = {program.get("file") for program in new.get("programs", [])}
+    extra = [program for program in kept if program.get("file") not in shipped]
+    if not extra:
+        return bytes(archived)
+    new["programs"] = [*new.get("programs", []), *extra]
+    return (json.dumps(new, indent=2) + "\n").encode()
+
+
+def _card_manifest(shell):
+    """The manifest on the card, or None when there is none to read."""
+    try:
+        return shell.read_file(MANIFEST_PATH)
+    except VmancerError:
+        return None
+
+
 def _ensure_directories(shell, entries):
     """Create the card directories the entries need.
 
@@ -187,11 +221,10 @@ def install_library(
 ):  # pylint: disable=too-many-locals
     """Upload an archive's files onto the card, returning a per-file result.
 
-    Files already present at the archive's size are skipped unless ``force``.
-    The device's own ``fs hash`` would be the cheap way to compare content, but
-    it returns wrong digests on ``1.0.0-rc.46``, so size is the only cheap
-    signal available and ``verify`` re-reads the size the card reports after
-    each upload.
+    A file is skipped, unless ``force``, only when the card's copy has its size and the device's
+    ``fs hash`` (:func:`card_digest`) matches its bytes; ``verify`` hashes each upload the same way.
+    The archive's manifest is merged into the card's (:func:`merged_manifest`), so programs installed
+    from elsewhere stay listed.
 
     Sustained puts drop the USB link: the device re-enumerates part way through
     a full library, which surfaces as an ``EIO`` write and a dead handle. It
@@ -205,6 +238,7 @@ def install_library(
     if not entries:
         raise FirmwareError(f"{os.path.basename(path)} contains no installable files")
     existing = {} if force else installed_sizes(shell, entries)
+    present = _card_manifest(shell) if any(e.device_path == MANIFEST_PATH for e in entries) else None
     _ensure_directories(shell, entries)
     installed, skipped = [], []
     total = sum(e.size for e in entries)
@@ -214,20 +248,30 @@ def install_library(
         pending = list(entries)
         while pending:
             entry = pending[0]
-            if entry.device_path not in installed and existing.get(entry.device_path) == entry.size:
+            payload = archive.read(entry.name)
+            if len(payload) != entry.size:
+                raise FirmwareError(f"{entry.name}: archive declares {entry.size}, holds {len(payload)}")
+            if entry.device_path == MANIFEST_PATH:
+                payload = merged_manifest(payload, present)
+            digest = card_digest(payload)
+            if (
+                entry.device_path not in installed
+                and existing.get(entry.device_path) == len(payload)
+                and shell.hash_file(entry.device_path).get("hash") == digest
+            ):
                 skipped.append(entry.device_path)
                 done += entry.size
                 pending.pop(0)
                 continue
-            payload = archive.read(entry.name)
-            if len(payload) != entry.size:
-                raise FirmwareError(f"{entry.name}: archive declares {entry.size}, holds {len(payload)}")
             try:
                 shell.put_file(entry.device_path, payload)
                 if verify:
-                    landed = int(shell.stat(entry.device_path).get("size", -1))
-                    if landed != entry.size:
-                        raise FirmwareError(f"{entry.device_path}: card holds {landed} of {entry.size}")
+                    landed = shell.hash_file(entry.device_path)
+                    if landed.get("hash") != digest:
+                        raise FirmwareError(
+                            f"{entry.device_path}: card holds {landed.get('size')} bytes hashing "
+                            f"{landed.get('hash')}, not the {len(payload)} hashing {digest} put"
+                        )
             except TransportError as err:
                 drops += 1
                 if reconnect is None or drops >= attempts:
@@ -263,7 +307,7 @@ def install(
     """Download a program library release and install it onto the card.
 
     Returns a result dict naming the release, what was uploaded and what was
-    already present at the right size. ``reconnect`` overrides how the shell is
+    already on the card with the same content. ``reconnect`` overrides how the shell is
     reopened when the device drops the link mid-upload; the default reopens the
     same unit by serial number.
     """
