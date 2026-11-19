@@ -878,7 +878,10 @@ class ShellClient:
             return decoded_limit(READ_CHUNK)
 
     def hash_file(self, path):
-        """Device-computed ``{"hash": <sha256 hex>, "size": n}`` for a file.
+        """Device-computed ``{"hash": <hex>, "size": n}`` for a file.
+
+        The digest is BLAKE2b-256 (:func:`pyvmancer.library.card_digest`), which the firmware SDK's
+        ``vmprog_crypto`` names sha256.
 
         Advertised as ``fs_hash`` in ``fs caps``; the digest is the natural cache
         key for anything derived from a program binary. Hashing runs at card

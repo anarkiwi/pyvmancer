@@ -113,7 +113,7 @@ def build_parser():
     sub.add_parser("manifest", help="show the SD program manifest over serial")
     sub.add_parser("resync", help="bounce the video timing to recover the output")
 
-    hasher = sub.add_parser("hash", help="device-computed sha256 of a file on the SD card")
+    hasher = sub.add_parser("hash", help="device-computed BLAKE2b-256 of a file on the SD card")
     hasher.add_argument("path")
 
     doctor = sub.add_parser("doctor", help="diagnose the device; exits 1 if any check fails")
@@ -198,7 +198,9 @@ def _add_library(sub):
     install = actions.add_parser("install", help="install a program library release onto the card")
     install.add_argument("version", nargs="?", default="latest", help="version, or 'latest' (default)")
     install.add_argument("--yes", action="store_true", help="actually install; otherwise this is a dry run")
-    install.add_argument("--force", action="store_true", help="re-upload files already present at size")
+    install.add_argument(
+        "--force", action="store_true", help="re-upload files already on the card with the same content"
+    )
     install.add_argument("--dir", dest="directory", help="download directory")
     install.add_argument("--no-verify", action="store_true", help="skip the post-upload size check")
 

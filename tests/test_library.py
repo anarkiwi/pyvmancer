@@ -74,8 +74,8 @@ class FakeShell:
             raise FirmwareError(f"no such directory: {path}")
         prefix = f"{path}/"
         return [
-            {"name": name[len(prefix) :], "type": "file", "size": size}
-            for name, size in self.files.items()
+            {"name": name[len(prefix) :], "type": "file", "size": len(data)}
+            for name, data in self.files.items()
             if name.startswith(prefix) and "/" not in name[len(prefix) :]
         ]
 
@@ -93,13 +93,24 @@ class FakeShell:
             self.fail_on[path] = remaining - 1
             raise TransportError("write to /dev/ttyACM0 failed: (5, 'Input/output error')")
         self.puts.append(path)
-        self.files[path] = len(data)
+        self.files[path] = bytes(data)
 
     def stat(self, path):
         """Size of a file on the card."""
         if path not in self.files:
             raise FirmwareError(f"not found: {path}")
-        return {"type": "file", "size": self.files[path]}
+        return {"type": "file", "size": len(self.files[path])}
+
+    def read_file(self, path):
+        """A file's bytes."""
+        if path not in self.files:
+            raise FirmwareError(f"not found: {path}")
+        return self.files[path]
+
+    def hash_file(self, path):
+        """The device's digest of a file: BLAKE2b-256."""
+        data = self.read_file(path)
+        return {"hash": hashlib.blake2b(data, digest_size=32).hexdigest(), "size": len(data)}
 
 
 def test_parse_checksums_reads_sha256sum_format():
@@ -233,7 +244,7 @@ def test_installed_sizes_reads_one_listing_per_directory(tmp_path):
     """Sizes are read by listing directories, not by stat-ing every file."""
     path = make_zip(path=str(tmp_path / "lib.zip"))
     entries = library_entries(path)
-    shell = FakeShell({"sd:/programs/lzx/bleach.vmprog": 14})
+    shell = FakeShell({"sd:/programs/lzx/bleach.vmprog": bytes(14)})
     assert installed_sizes(shell, entries)["sd:/programs/lzx/bleach.vmprog"] == 14
 
 
@@ -253,10 +264,10 @@ def test_install_library_uploads_everything_to_a_bare_card(tmp_path):
     assert not result["skipped"]
 
 
-def test_install_library_skips_files_already_at_size(tmp_path):
+def test_install_library_skips_files_already_on_the_card(tmp_path):
     """Re-installing the same release uploads nothing."""
     path = make_zip(path=str(tmp_path / "lib.zip"))
-    present = {f"sd:/{name}": len(data) for name, data in MEMBERS.items()}
+    present = {f"sd:/{name}": data for name, data in MEMBERS.items()}
     shell = FakeShell(present)
     result = install_library(shell, path)
     assert not result["installed"]
@@ -266,7 +277,7 @@ def test_install_library_skips_files_already_at_size(tmp_path):
 def test_install_library_force_reuploads_everything(tmp_path):
     """``force`` ignores what is already there."""
     path = make_zip(path=str(tmp_path / "lib.zip"))
-    present = {f"sd:/{name}": len(data) for name, data in MEMBERS.items()}
+    present = {f"sd:/{name}": data for name, data in MEMBERS.items()}
     shell = FakeShell(present)
     result = install_library(shell, path, force=True)
     assert len(result["installed"]) == 3
@@ -276,9 +287,54 @@ def test_install_library_force_reuploads_everything(tmp_path):
 def test_install_library_reuploads_a_file_of_the_wrong_size(tmp_path):
     """A truncated file on the card is replaced."""
     path = make_zip(path=str(tmp_path / "lib.zip"))
-    shell = FakeShell({"sd:/programs/lzx/bleach.vmprog": 1})
+    shell = FakeShell({"sd:/programs/lzx/bleach.vmprog": b"b"})
     result = install_library(shell, path)
     assert "sd:/programs/lzx/bleach.vmprog" in result["installed"]
+
+
+def test_install_library_reuploads_a_changed_file_of_the_same_size(tmp_path):
+    """Same size, different bytes: the device's hash tells them apart."""
+    path = make_zip(path=str(tmp_path / "lib.zip"))
+    present = {f"sd:/{name}": data for name, data in MEMBERS.items()}
+    present["sd:/programs/lzx/bleach.vmprog"] = b"BLEACH payload"
+    shell = FakeShell(present)
+    result = install_library(shell, path)
+    assert result["installed"] == ["sd:/programs/lzx/bleach.vmprog"]
+    assert shell.files["sd:/programs/lzx/bleach.vmprog"] == MEMBERS["programs/lzx/bleach.vmprog"]
+
+
+def test_card_digest_is_unkeyed_blake2b_256():
+    """The firmware SDK's ``sha256`` helper wraps ``crypto_blake2b`` with a 32-byte digest."""
+    assert library.card_digest(b"abc") == "bddd813c634239723171ef3fee98579b94964e3bb1cb3e427262c8c068d52319"
+
+
+def test_install_library_keeps_programs_the_archive_does_not_ship_in_the_manifest(tmp_path):
+    """A community program installed by hand stays listed after a library update."""
+    shipped = {"version": "1.0.3", "programs": [{"file": "lzx/bleach.vmprog", "program_version": "2"}]}
+    on_card = {
+        "version": "1.0.2",
+        "programs": [
+            {"file": "lzx/bleach.vmprog", "program_version": "1"},
+            {"file": "boneoh/rgb_bit_rotator.vmprog"},
+        ],
+    }
+    members = {**MEMBERS, "programs/manifest.json": json.dumps(shipped).encode()}
+    path = make_zip(members, path=str(tmp_path / "lib.zip"))
+    shell = FakeShell({"sd:/programs/manifest.json": json.dumps(on_card).encode()})
+    install_library(shell, path)
+    got = json.loads(shell.files["sd:/programs/manifest.json"])
+    assert got["version"] == "1.0.3"
+    assert got["programs"] == [shipped["programs"][0], on_card["programs"][1]]
+    again = install_library(shell, path)
+    assert not again["installed"], "the merged manifest is what the card already holds"
+
+
+def test_merged_manifest_is_the_archive_s_when_the_card_adds_nothing():
+    """Nothing to keep, or nothing readable: the archive's bytes go up as shipped."""
+    archived = b'{"programs": [{"file": "lzx/a.vmprog"}]}'
+    assert library.merged_manifest(archived, None) == archived
+    assert library.merged_manifest(archived, b"not json") == archived
+    assert library.merged_manifest(archived, archived) == archived
 
 
 def test_install_library_creates_missing_directories(tmp_path):
@@ -304,10 +360,10 @@ def test_install_library_verifies_the_landed_size(tmp_path):
 
     def truncating_put(device_path, data):
         shell.puts.append(device_path)
-        shell.files[device_path] = len(data) - 1
+        shell.files[device_path] = bytes(data)[:-1]
 
     shell.put_file = truncating_put
-    with pytest.raises(FirmwareError, match="card holds"):
+    with pytest.raises(FirmwareError, match="card holds .* not the"):
         install_library(shell, path)
 
 
@@ -372,7 +428,7 @@ def test_install_says_nothing_about_restarting_when_nothing_changed(tmp_path, mo
     """A no-op install needs no restart."""
     path = make_zip(path=str(tmp_path / "lib.zip"))
     monkeypatch.setattr("pyvmancer.library.download_library", lambda *a, **k: path)
-    present = {f"sd:/{name}": len(data) for name, data in MEMBERS.items()}
+    present = {f"sd:/{name}": data for name, data in MEMBERS.items()}
     result = install("latest", shell=FakeShell(present), releases=[library_release()])
     assert result["restart_required"] is False
 
